@@ -77,7 +77,7 @@ class VoltageControlEnvInitializationTestCase(unittest.TestCase):
         # For sake of testing, set loads with 0 power to have a
         # power factor of 1.
         pf[np.isnan(pf)] = 1
-        np_test.assert_array_less(0.8, pf)
+        np_test.assert_array_less(min_load_pf, pf)
 
 
 if __name__ == '__main__':
