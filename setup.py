@@ -28,16 +28,18 @@ setup(name='gym_powerworld',
             'Development Status :: 1 - Planning',
             'Intended Audience :: Science/Research',
             'License :: OSI Approved :: BSD License',
-            'Programming Language :: Python :: 3.6'
-            # TODO: Add 3.7 after figuring out pywin32 issues
+            'Programming Language :: Python :: 3.5',
+            'Programming Language :: Python :: 3.6',
+            'Programming Language :: Python :: 3.7',
+            'Programming Language :: Python :: 3.8'
       ],
       keywords=('deep reinforcement learning machine PowerWorld smart grid '
                 'voltage control electric power system'),
-      # TODO: Add 3.7 after figuring out pywin32 issues
-      python_requires='==3.6.*',
+      python_requires='>=3.5',
       install_requires=[
             'gym',
             'numpy',
-            'pandas'
+            'pandas',
+            'esa'
       ]
 )
