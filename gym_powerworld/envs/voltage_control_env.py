@@ -1,10 +1,18 @@
 import gym
 from gym import spaces
-from gym.utils import seeding
 import numpy as np
 import logging
 from esa import SAW
 from typing import Union, Tuple
+
+# When generating scenarios, we're drawing random generation to meet
+# the load. There will be some rounding error, so set a reasonable
+# tolerance. Note this is in MW. In the power flow, the slack bus will
+# pick up this rounding error - that's okay.
+GEN_LOAD_DELTA_TOL = 0.001
+
+# For safety we'll have a maximum number of loop iteration.
+ITERATION_MAX = 100
 
 
 class VoltageControlEnv(gym.Env):
@@ -15,10 +23,12 @@ class VoltageControlEnv(gym.Env):
                  max_load_factor: Union[str, float] = None,
                  min_load_factor: Union[str, float] = None,
                  min_load_pf: float = 0.8,
+                 lead_pf_probability: float = 0.1,
                  load_on_probability: float = 0.8,
                  num_gen_voltage_bins: int = 5,
                  gen_voltage_range: Tuple[float, float] = (0.9, 1.1),
-                 seed: Union[str, float] = None):
+                 seed: Union[str, float] = None,
+                 log_level=logging.INFO):
         """
 
         :param pwb_path: Full path to a PowerWorld .pwb file
@@ -44,6 +54,9 @@ class VoltageControlEnv(gym.Env):
         :param min_load_pf: Minimum load power factor to be used when
             generating loading scenarios. Should be a positive number
             in the interval (0, 1].
+        :param lead_pf_probability: Probability on a load by load
+            basis that the power factor will be leading. Should be
+            a positive number in the interval [0, 1].
         :param load_on_probability: For each scenario, probability
             to determine on a load by load basis which are "on" (i.e.
             have power consumption > 0). Should be a positive number
@@ -56,15 +69,17 @@ class VoltageControlEnv(gym.Env):
         :param gen_voltage_range: Minimum and maximum allowed generator
             voltage regulation set points (in per unit).
         :param seed: Seed for random number.
+        :param log_level: Log level for the environment's logger. Pass
+            a constant from the logging module, e.g. logging.DEBUG or
+            logging.INFO.
         """
 
         # Set up log.
         self.log = logging.getLogger(self.__class__.__name__)
+        self.log.setLevel(log_level)
 
         # Handle random seeding up front.
-        self.np_random = None  # Type: np.random.RandomState
-        # Note that calling the seed function will override np_random.
-        self.seed(seed)
+        self.rng = np.random.default_rng(seed)
 
         # Initialize a SimAuto wrapper.
         self.saw = SAW(pwb_path, early_bind=True)
@@ -94,7 +109,9 @@ class VoltageControlEnv(gym.Env):
                 'gen', self.gen_data.loc[:, cols])
             self.log.warning(f'{gen_leq_0.sum()} generators with '
                              'GenMWMin < 0 have had GenMWMin set to 0.')
-            pass
+
+        # For convenience, compute the maximum generation capacity.
+        gen_capacity = self.max_load_mw = self.gen_data['GenMWMax'].sum()
 
         # Get load data.
         # TODO: Somehow need to ensure that the only active load models
@@ -128,7 +145,7 @@ class VoltageControlEnv(gym.Env):
         else:
             # If not given a max load factor, compute the maximum load
             # as the sum of the generator maximums.
-            self.max_load_mw = self.gen_data['GenMWMax'].sum()
+            self.max_load_mw = gen_capacity
 
         # Compute minimum system loading.
         if min_load_factor is not None:
@@ -137,25 +154,36 @@ class VoltageControlEnv(gym.Env):
         else:
             self.min_load_mw = self.gen_data['GenMWMin'].sum()
 
+        # Warn if our generation capacity is more than double the max
+        # load - this could mean generator maxes aren't realistic.
+        gen_factor = gen_capacity / self.max_load_mw
+        if gen_factor >= 2:
+            self.log.warning(
+                f'The given generator capacity, {gen_capacity:.2f} MW, '
+                f'is {gen_factor:.2f} times larger than the maximum load, '
+                f'{self.max_load_mw:.2f} MW. This could indicate that '
+                'the case does not have proper generator limits set up.')
+
         # Time to generate scenarios.
         # Initialize list to hold all information pertaining to all
         # scenarios.
         self.scenarios = []
 
         # Draw an active power loading condition for each case.
-        self.scenario_total_loads_mw = self.np_random.uniform(
+        self.scenario_total_loads_mw = self.rng.uniform(
             self.min_load_mw, self.max_load_mw, num_scenarios
         )
 
         # Draw to determine which loads will be "on" for each scenario.
         self.num_loads = self.load_data.shape[0]
-        loads_on_draw = self.np_random.rand(num_scenarios, self.num_loads)
-        self.scenario_loads_off = loads_on_draw > load_on_probability
+        self.scenario_loads_off = \
+            (self.rng.random((num_scenarios, self.num_loads))
+             > load_on_probability)
 
         # Draw initial loading levels. Loads which are "off" will be
         # removed, and then each row will be scaled.
         self.scenario_individual_loads_mw = \
-            self.np_random.rand(num_scenarios, self.num_loads)
+            self.rng.random((num_scenarios, self.num_loads))
 
         # Zero out loads which are off.
         self.scenario_individual_loads_mw[self.scenario_loads_off] = 0.0
@@ -178,8 +206,8 @@ class VoltageControlEnv(gym.Env):
 
         # Now, come up with reactive power levels for each load based
         # on the minimum power factor.
-        pf = self.np_random.uniform(min_load_pf, 1,
-                                    (num_scenarios, self.num_loads))
+        pf = self.rng.uniform(min_load_pf, 1,
+                              (num_scenarios, self.num_loads))
 
         # Q = P * tan(arccos(pf))
         self.scenario_individual_loads_mvar = (
@@ -187,9 +215,86 @@ class VoltageControlEnv(gym.Env):
             * np.tan(np.arccos(pf))
         )
 
+        # Possibly flip the sign of the reactive power for some loads
+        # in order to make their power factor leading.
+        lead = (self.rng.random((num_scenarios, self.num_loads))
+                < lead_pf_probability)
+        self.scenario_individual_loads_mvar[lead] *= -1
+
         # Now, we'll take a similar procedure to set up generation
         # levels. Unfortunately, this is a tad more complex since we
         # have upper and lower limits.
+        #
+        # Initialize the generator power levels to 0.
+        self.scenario_gen_mw = np.zeros(
+            (num_scenarios, self.gen_data.shape[0]))
+
+        # Initialize indices that we'll be shuffling.
+        gen_indices = np.arange(0, self.gen_data.shape[0])
+
+        # Loop over each scenario.
+        # TODO: this should be vectorized.
+        # TODO: should we instead draw which generators are on like
+        #   what's done with the load? It'll have similar issues.
+        for scenario_idx in range(num_scenarios):
+            # Draw random indices for generators. In this way, we'll
+            # start with a different generator each time.
+            self.rng.shuffle(gen_indices)
+
+            # Get our total load for this scenario. We'll decrement
+            # it as we add generation.
+            load = self.scenario_total_loads_mw[scenario_idx]
+
+            # Randomly draw generation until we meet the load.
+            # The while loop is here in case we "under draw" generation
+            # such that generation < load.
+            i = 0
+            while (abs(self.scenario_gen_mw[scenario_idx, :].sum() - load)
+                    > GEN_LOAD_DELTA_TOL) and (i < ITERATION_MAX):
+
+                # Ensure generation is zeroed out from the last
+                # last iteration of the loop.
+                self.scenario_gen_mw[scenario_idx, :] = 0.0
+
+                # For each generator, draw a power level between its
+                # minimum and maximum.
+                for gen_idx in gen_indices:
+                    # Compute the total generation for this scenario
+                    # at this point in time.
+                    gen_total = self.scenario_gen_mw[scenario_idx, :].sum()
+
+                    # Extract the minimum for this generator.
+                    gen_min = self.gen_data.iloc[gen_idx]['GenMWMin']
+
+                    # The max will be the minimum of the load and the
+                    # generator's maximum.
+                    gen_max = min(self.gen_data.iloc[gen_idx]['GenMWMax'],
+                                  load)
+
+                    # Draw for this generator.
+                    gen_mw = self.rng.uniform(gen_min, gen_max)
+
+                    # Place the generation in the appropriate spot.
+                    if (gen_mw + gen_total) > load:
+                        # Generation cannot exceed load. Set this
+                        # generator power output to the remaining load
+                        # and break out of the loop. This will keep the
+                        # remaining generators at 0.
+                        self.scenario_gen_mw[scenario_idx, gen_idx] = \
+                            load - gen_total
+                        break
+                    else:
+                        # Use the randomly drawn gen_mw.
+                        self.scenario_gen_mw[scenario_idx, gen_idx] = gen_mw
+
+                i += 1
+
+            if i >= ITERATION_MAX:
+                # TODO: better exception.
+                raise UserWarning(f'Iterations exceeded {ITERATION_MAX}')
+
+            self.log.debug(f'It took {i} iterations to create generation for '
+                           f'scenario {scenario_idx}')
 
         # TODO: regulators
         # TODO: shunts
@@ -198,12 +303,12 @@ class VoltageControlEnv(gym.Env):
         # TODO: Handle exceptions.
         self.saw.SolvePowerFlow()
 
-    def seed(self, seed=None):
-        """Borrowed from Gym.
-        https://github.com/openai/gym/blob/master/gym/envs/toy_text/blackjack.py
-        """
-        self.np_random, seed = seeding.np_random(seed)
-        return [seed]
+    # def seed(self, seed=None):
+    #     """Borrowed from Gym.
+    #     https://github.com/openai/gym/blob/master/gym/envs/toy_text/blackjack.py
+    #     """
+    #     self.np_random, seed = seeding.np_random(seed)
+    #     return [seed]
 
     def render(self, mode='human'):
         """Not planning to implement this for now. However, it could
