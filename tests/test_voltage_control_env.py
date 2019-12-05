@@ -112,7 +112,9 @@ class VoltageControlEnvInitializationTestCase(unittest.TestCase):
         # Ensure generator outputs are within bounds.
         for gen_idx, row in enumerate(env.gen_data.itertuples()):
             gen_output = env.scenario_gen_mw[:, gen_idx]
+            # noinspection PyUnresolvedReferences
             self.assertTrue((gen_output <= row.GenMWMax).all())
+            # noinspection PyUnresolvedReferences
             self.assertTrue((gen_output >= row.GenMWMin).all())
 
 
