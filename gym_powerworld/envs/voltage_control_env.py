@@ -98,6 +98,7 @@ class VoltageControlEnv(gym.Env):
         # Get the per unit voltage magnitude the generators regulate to.
         self.gen_data = self.saw.GetParametersMultipleElement(
             ObjectType='gen', ParamList=gen_params)
+        self.num_gens = self.gen_data.shape[0]
 
         # If we have negative minimum generation levels, zero them
         # out.
@@ -227,10 +228,10 @@ class VoltageControlEnv(gym.Env):
         #
         # Initialize the generator power levels to 0.
         self.scenario_gen_mw = np.zeros(
-            (num_scenarios, self.gen_data.shape[0]))
+            (num_scenarios, self.num_gens))
 
         # Initialize indices that we'll be shuffling.
-        gen_indices = np.arange(0, self.gen_data.shape[0])
+        gen_indices = np.arange(0, self.num_gens)
 
         # Loop over each scenario.
         # TODO: this should be vectorized.
