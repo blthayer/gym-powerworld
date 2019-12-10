@@ -297,6 +297,35 @@ class VoltageControlEnv(gym.Env):
             self.log.debug(f'It took {i} iterations to create generation for '
                            f'scenario {scenario_idx}')
 
+        # Create action space by discretizing generator set points.
+        self.action_space = spaces.Discrete(self.num_gens
+                                            * num_gen_voltage_bins)
+
+        # Create the generator bins.
+        self.gen_bins = np.linspace(gen_voltage_range[0], gen_voltage_range[1],
+                                    num_gen_voltage_bins)
+
+        # Columns we'll use for voltage control with SAW's
+        # ChangeParametersSingleElement.
+        self.gen_voltage_control_fields = gen_key_fields + volt_set
+
+        # Now, map each action to a generator set-point.
+        self.action_map = dict()
+
+        i = 0
+        # Loop over the index.
+        for gen_data_idx in self.gen_data.index:
+            # Extract the identifying information for this generator.
+            gen_key_values = \
+                self.gen_data.loc[gen_data_idx, gen_key_fields].tolist()
+
+            # Create a list compatible with
+            # SAW.ChangeParametersSingleElement for each voltage level.
+            for v in self.gen_bins:
+                self.action_map[i] = gen_key_values + [v]
+                i += 1
+
+        print('stuff')
         # TODO: regulators
         # TODO: shunts
 
