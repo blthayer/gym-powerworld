@@ -28,7 +28,8 @@ class VoltageControlEnv(gym.Env):
                  num_gen_voltage_bins: int = 5,
                  gen_voltage_range: Tuple[float, float] = (0.9, 1.1),
                  seed: Union[str, float] = None,
-                 log_level=logging.INFO):
+                 log_level=logging.INFO,
+                 dtype=np.float32):
         """
 
         :param pwb_path: Full path to a PowerWorld .pwb file
@@ -72,6 +73,7 @@ class VoltageControlEnv(gym.Env):
         :param log_level: Log level for the environment's logger. Pass
             a constant from the logging module, e.g. logging.DEBUG or
             logging.INFO.
+        :param dtype: Numpy datatype for observations.
         """
 
         # Set up log.
@@ -85,6 +87,9 @@ class VoltageControlEnv(gym.Env):
         self.saw = SAW(pwb_path, early_bind=True)
         self.log.debug('PowerWorld case loaded.')
 
+        # Track data type.
+        self.dtype = dtype
+
         # Get generator data.
         gen_key_field_df = self.saw.get_key_fields_for_object_type('gen')
         gen_key_fields = gen_key_field_df['internal_field_name'].tolist()
@@ -92,8 +97,14 @@ class VoltageControlEnv(gym.Env):
         gen_p_q = ['GenMW', 'GenMVR']
         volt_set = ['GenVoltSet']
         gen_limits = ['GenMWMax', 'GenMWMin', 'GenMVRMax', 'GenMVRMin']
+        gen_status = ['GenStatus']
         gen_params = (gen_key_fields + bus_type + gen_p_q + volt_set
-                      + gen_limits)
+                      + gen_limits + gen_status)
+
+        # The following fields will be used for observations during
+        # learning.
+        self.gen_obs_fields = (gen_key_fields + gen_p_q + volt_set
+                               + ['GenMVRPercent'] + gen_status)
 
         # Get the per unit voltage magnitude the generators regulate to.
         self.gen_data = self.saw.GetParametersMultipleElement(
@@ -126,7 +137,20 @@ class VoltageControlEnv(gym.Env):
             ObjectType='load', ParamList=load_params
         )
 
-        # Warn if we have constant current or constant impedance
+        # Get bus data.
+        bus_key_field_df = self.saw.get_key_fields_for_object_type('bus')
+        bus_key_fields = bus_key_field_df['internal_field_name'].tolist()
+        self.vpu_field = 'BusPUVolt'
+        bus_voltage_field = [self.vpu_field]
+        # The following fields will be used for observations.
+        self.bus_obs_fields = bus_key_fields + bus_voltage_field
+        # Get bus data from PowerWorld.
+        self.bus_data = self.saw.GetParametersMultipleElement(
+            ObjectType='bus', ParamList=bus_key_fields)
+        # For convenience, track number of buses.
+        self.num_buses = self.bus_data.shape[0]
+
+        # Warn if we have constant current or constant impedance load
         # values. Then, zero out the constant current and constant
         # impedance portions.
         if (self.load_data[load_i_z] != 0.0).any().any():
@@ -325,13 +349,41 @@ class VoltageControlEnv(gym.Env):
                 self.action_map[i] = gen_key_values + [v]
                 i += 1
 
+        # Time for the observation space. This will include:
+        #   - bus voltages
+        #   - generator voltage set points
+        #   - generator power factor
+        #   - generator portion of maximum reactive power
+        #   - generator status
+        # TODO: How best to handle low/high? Could use independent
+        #   bounds for each observation type.
+        self.num_obs = self.num_buses + 4 * self.num_gens
+        self.observation_space = spaces.Box(
+            low=0.9, high=1.2, shape=(self.num_obs,), dtype=self.dtype)
+
+        # Create indices for the various components of the observations.
+        self.bus_v_indices = (0, self.num_buses)
+        self.gen_v_indices = (self.num_buses, self.num_buses + self.num_gens)
+        self.gen_pf_indices = (self.num_buses + self.num_gens,
+                               self.num_buses + 2 * self.num_gens)
+        self.gen_var_indices = (self.num_buses + 2 * self.num_gens,
+                                self.num_buses + 3 * self.num_gens)
+        self.gen_status_indices = (self.num_buses + 3 * self.num_gens,
+                                   self.num_buses + 4 * self.num_gens)
+
+        # TODO: Remove this stuff.
+        # Open generators which have 0 real power set.
+        zero_mw = self.gen_data['GenMW'] == 0
+        subset = self.gen_data.loc[:, gen_key_fields + ['GenMW', 'GenStatus']]
+        subset['GenStatus'] = subset['GenMW'].map(gen_numeric_status_map)
+        self.saw.change_and_confirm_params_multiple_element(
+            ObjectType='gen', command_df=subset)
+        self.saw.SolvePowerFlow()
+        obs = self._get_observation()
+
         print('stuff')
         # TODO: regulators
         # TODO: shunts
-
-        # Start by solving the power flow.
-        # TODO: Handle exceptions.
-        self.saw.SolvePowerFlow()
 
     # def seed(self, seed=None):
     #     """Borrowed from Gym.
@@ -358,3 +410,62 @@ class VoltageControlEnv(gym.Env):
     def close(self):
         """Tear down SimAuto wrapper."""
         self.saw.exit()
+
+    def _get_observation(self) -> np.ndarray:
+        """Helper to return an observation. For the given simulation,
+        the power flow should already have been solved.
+        """
+        # Start by getting bus voltages.
+        bus_voltage = self.saw.GetParametersMultipleElement(
+            ObjectType='bus', ParamList=self.bus_obs_fields)
+
+        # Now, get all relevant generator data.
+        gen_data = self.saw.GetParametersMultipleElement(
+            ObjectType='gen', ParamList=self.gen_obs_fields)
+
+        # Initialize return.
+        out = np.ones(self.num_obs, dtype=self.dtype)
+
+        # Assign the load voltage data.
+        out[self.bus_v_indices[0]:self.bus_v_indices[1]] = \
+            bus_voltage[self.vpu_field].to_numpy(dtype=self.dtype)
+
+        # Set generator voltage set points.
+        out[self.gen_v_indices[0]:self.gen_v_indices[1]] = \
+            gen_data['GenVoltSet'].to_numpy(dtype=self.dtype)
+
+        # Compute and assign power factor for the generators. Set the
+        # power factor equal to 1 where generators are off.
+        # pf = P / |S|
+        s_mag = np.sqrt((gen_data['GenMW'] ** 2
+                         + gen_data['GenMVR'] ** 2).to_numpy(dtype=self.dtype))
+
+        out[self.gen_pf_indices[0]:self.gen_pf_indices[1]] = \
+            np.divide(gen_data['GenMW'].to_numpy(dtype=self.dtype), s_mag,
+                      out=out[self.gen_pf_indices[0]:self.gen_pf_indices[1]],
+                      where=s_mag > 0)
+
+        # Assign percentage MVR loading for generators.
+        out[self.gen_var_indices[0]:self.gen_var_indices[1]] = \
+            gen_data['GenMVRPercent'].to_numpy(dtype=self.dtype) / 100
+
+        # Assign status.
+        out[self.gen_status_indices[0]:self.gen_status_indices[1]] = \
+            gen_data['GenStatus'].map(gen_numeric_status_map).to_numpy(
+                dtype=self.dtype)
+
+        # All done.
+        return out
+
+
+def gen_numeric_status_map(x: str):
+    """Map for generator states: closed --> 1, open --> 0
+
+    :param x: Generator status, either 'Open' or 'Closed' (case
+        insensitive).
+    :returns: 1 if open, 0 if closed.
+    """
+    if x.lower() == 'closed':
+        return 1
+    else:
+        return 0
