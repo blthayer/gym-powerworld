@@ -39,7 +39,7 @@ setup(name='gym_powerworld',
       install_requires=[
             'gym',
             'numpy',
-            'pandas',
+            'pandas >= 0.24',
             'esa'
       ]
 )
