@@ -14,11 +14,44 @@ GEN_LOAD_DELTA_TOL = 0.001
 # For safety we'll have a maximum number of loop iteration.
 ITERATION_MAX = 100
 
+# Constants related to PowerWorld (for convenience and cleanliness):
+# Constant power portion of PowerWorld loads.
+LOAD_P = ['LoadSMW', 'LoadSMVR']
+
+# Constant current and constant impedance portions of PowerWorld
+# loads.
+LOAD_I_Z = ['LoadIMW', 'LoadIMVR', 'LoadZMW', 'LoadZMVR']
+
 
 class VoltageControlEnv(gym.Env):
     """Environment for performing voltage control with the PowerWorld
     Simulator.
     """
+
+    # All PowerWorld generator fields that will be used during
+    # environment initialization, sans key fields.
+    GEN_FIELDS = ['BusCat', 'GenMW', 'GenMVR', 'GenVoltSet', 'GenMWMax',
+                  'GenMWMin', 'GenMVRMax', 'GenMVRMin', 'GenStatus']
+
+    # PowerWorld generator fields which will be used when generating
+    # an observation during a time step.
+    GEN_OBS_FIELDS = ['GenMW', 'GenMVA', 'GenVoltSet', 'GenMVRPercent',
+                      'GenStatus']
+
+    # All PowerWorld load fields that will be used during environment
+    # initialization, sans key fields.
+    LOAD_FIELDS = LOAD_P + LOAD_I_Z
+
+    # PowerWorld load fields that will be used when generating an
+    # observation during a time step. Voltage will be handled at the
+    # bus level rather than the load level.
+    LOAD_OBS_FIELDS = LOAD_P
+
+    # Bus fields for environment initialization will simply be the
+    # key fields, which are not listed here. During a time step, we'll
+    # want the per unit voltage at the bus.
+    BUS_OBS_FIELDS = ['BusPUVolt']
+
     def __init__(self, pwb_path: str, num_scenarios: int,
                  max_load_factor: Union[str, float] = None,
                  min_load_factor: Union[str, float] = None,
@@ -75,7 +108,9 @@ class VoltageControlEnv(gym.Env):
             logging.INFO.
         :param dtype: Numpy datatype for observations.
         """
-
+        ################################################################
+        # Logging, seeding, SAW initialization, simple attributes
+        ################################################################
         # Set up log.
         self.log = logging.getLogger(self.__class__.__name__)
         self.log.setLevel(log_level)
@@ -83,84 +118,86 @@ class VoltageControlEnv(gym.Env):
         # Handle random seeding up front.
         self.rng = np.random.default_rng(seed)
 
-        # Initialize a SimAuto wrapper.
+        # Initialize a SimAuto wrapper. Use early binding since it's
+        # faster.
         self.saw = SAW(pwb_path, early_bind=True)
         self.log.debug('PowerWorld case loaded.')
 
         # Track data type.
         self.dtype = dtype
 
+        self.num_scenarios = num_scenarios
+        ################################################################
+        # Generator fields and data
+        ################################################################
         # Get generator data.
-        gen_key_field_df = self.saw.get_key_fields_for_object_type('gen')
-        gen_key_fields = gen_key_field_df['internal_field_name'].tolist()
-        bus_type = ['BusCat']
-        gen_p_q = ['GenMW', 'GenMVR']
-        volt_set = ['GenVoltSet']
-        gen_limits = ['GenMWMax', 'GenMWMin', 'GenMVRMax', 'GenMVRMin']
-        gen_status = ['GenStatus']
-        gen_params = (gen_key_fields + bus_type + gen_p_q + volt_set
-                      + gen_limits + gen_status)
+        # Start by getting a listing of the key fields.
+        self.gen_key_fields = self.saw.get_key_field_list('gen')
+        # Define all the parameters we'll need for setup.
+        self.gen_fields = self.gen_key_fields + self.GEN_FIELDS
 
         # The following fields will be used for observations during
         # learning.
-        self.gen_obs_fields = (gen_key_fields + gen_p_q + volt_set
-                               + ['GenMVRPercent'] + gen_status)
+        self.gen_obs_fields = self.gen_key_fields + self.GEN_OBS_FIELDS
 
-        # Get the per unit voltage magnitude the generators regulate to.
+        # Use the SimAuto Wrapper to get generator data from PowerWorld.
         self.gen_data = self.saw.GetParametersMultipleElement(
-            ObjectType='gen', ParamList=gen_params)
+            ObjectType='gen', ParamList=self.gen_fields)
+
+        # For convenience, get the number of generators.
         self.num_gens = self.gen_data.shape[0]
 
-        # If we have negative minimum generation levels, zero them
-        # out.
-        gen_leq_0 = self.gen_data['GenMWMin'] < 0
-        if (self.gen_data['GenMWMin'] < 0).any():
-            self.gen_data.loc[gen_leq_0, 'GenMWMin'] = 0.0
-            cols = gen_key_fields + ['GenMWMin']
-            self.saw.change_and_confirm_params_multiple_element(
-                'gen', self.gen_data.loc[:, cols])
-            self.log.warning(f'{gen_leq_0.sum()} generators with '
-                             'GenMWMin < 0 have had GenMWMin set to 0.')
+        # Zero out negative minimum generation.
+        self._zero_negative_gen_mw_limits()
 
-        # For convenience, compute the maximum generation capacity.
-        gen_capacity = self.max_load_mw = self.gen_data['GenMWMax'].sum()
+        # For convenience, compute the maximum generation capacity. This
+        # will also represent maximum loading.
+        # TODO: Confirm that the produce/consume convention is correct.
+        self.gen_mw_capacity = self.gen_data['GenMWMax'].sum()
+        self.gen_mvar_produce_capacity = self.gen_data['GenMVRMax'].sum()
+        self.gen_mvar_consume_capacity = self.gen_data['GenMVRMin'].sum()
 
+        ################################################################
+        # Load fields and data
+        ################################################################
         # Get load data.
         # TODO: Somehow need to ensure that the only active load models
         #   are ZIP.
-        load_key_field_df = self.saw.get_key_fields_for_object_type('load')
-        load_key_fields = load_key_field_df['internal_field_name'].tolist()
-        load_p = ['LoadSMW', 'LoadSMVR']
-        load_i_z = ['LoadIMW', 'LoadIMVR', 'LoadZMW', 'LoadZMVR']
-        load_params = load_key_fields + load_p + load_i_z
+        # Get key fields for loads.
+        self.load_key_fields = self.saw.get_key_field_list('load')
+        self.load_fields = self.load_key_fields + self.LOAD_FIELDS
+        # Query PowerWorld for the load data.
         self.load_data = self.saw.GetParametersMultipleElement(
-            ObjectType='load', ParamList=load_params
-        )
+            ObjectType='load', ParamList=self.load_fields)
 
-        # Get bus data.
-        bus_key_field_df = self.saw.get_key_fields_for_object_type('bus')
-        bus_key_fields = bus_key_field_df['internal_field_name'].tolist()
-        self.vpu_field = 'BusPUVolt'
-        bus_voltage_field = [self.vpu_field]
+        # Number of loads for convenience.
+        self.num_loads = self.load_data.shape[0]
+
         # The following fields will be used for observations.
-        self.bus_obs_fields = bus_key_fields + bus_voltage_field
+        self.load_obs_fields = self.load_key_fields + self.LOAD_OBS_FIELDS
+
+        # Zero out constant current and constant impedance portions so
+        # we simply have constant power.
+        # TODO: in the future, different loads should be considered.
+        self._zero_i_z_loads()
+
+        ################################################################
+        # Bus fields and data
+        ################################################################
+        # Get bus data.
+        self.bus_key_fields = self.saw.get_key_field_list('bus')
+
+        # The following fields will be used for observations.
+        self.bus_obs_fields = self.bus_key_fields + ['BusPUVolt']
         # Get bus data from PowerWorld.
         self.bus_data = self.saw.GetParametersMultipleElement(
-            ObjectType='bus', ParamList=bus_key_fields)
+            ObjectType='bus', ParamList=self.bus_key_fields)
         # For convenience, track number of buses.
         self.num_buses = self.bus_data.shape[0]
 
-        # Warn if we have constant current or constant impedance load
-        # values. Then, zero out the constant current and constant
-        # impedance portions.
-        if (self.load_data[load_i_z] != 0.0).any().any():
-            self.log.warning('The given PowerWorld case has loads with '
-                             'non-zero constant current and constant impedance'
-                             ' portions. These will be zeroed out.')
-            self.load_data.loc[:, load_i_z] = 0.0
-            self.saw.change_and_confirm_params_multiple_element(
-                'Load', self.load_data.loc[:, load_key_fields + load_i_z])
-
+        ################################################################
+        # Minimum and maximum system loading
+        ################################################################
         # Compute maximum system loading.
         if max_load_factor is not None:
             # If given a max load factor, multiply it by the current
@@ -170,7 +207,7 @@ class VoltageControlEnv(gym.Env):
         else:
             # If not given a max load factor, compute the maximum load
             # as the sum of the generator maximums.
-            self.max_load_mw = gen_capacity
+            self.max_load_mw = self.gen_mw_capacity
 
         # Compute minimum system loading.
         if min_load_factor is not None:
@@ -181,146 +218,39 @@ class VoltageControlEnv(gym.Env):
 
         # Warn if our generation capacity is more than double the max
         # load - this could mean generator maxes aren't realistic.
-        gen_factor = gen_capacity / self.max_load_mw
+        gen_factor = self.gen_mw_capacity / self.max_load_mw
         if gen_factor >= 2:
             self.log.warning(
-                f'The given generator capacity, {gen_capacity:.2f} MW, '
-                f'is {gen_factor:.2f} times larger than the maximum load, '
+                f'The given generator capacity, {self.gen_mw_capacity:.2f} MW,'
+                f' is {gen_factor:.2f} times larger than the maximum load, '
                 f'{self.max_load_mw:.2f} MW. This could indicate that '
                 'the case does not have proper generator limits set up.')
 
+        ################################################################
+        # Scenario/episode initialization: loads
+        ################################################################
         # Time to generate scenarios.
         # Initialize list to hold all information pertaining to all
         # scenarios.
         self.scenarios = []
 
-        # Draw an active power loading condition for each case.
-        self.scenario_total_loads_mw = self.rng.uniform(
-            self.min_load_mw, self.max_load_mw, num_scenarios
-        )
+        self.total_load_mw, self.loads_mw, self.loads_mvar = \
+            self._compute_loading(load_on_probability=load_on_probability,
+                                  min_load_pf=min_load_pf,
+                                  lead_pf_probability=lead_pf_probability)
 
-        # Draw to determine which loads will be "on" for each scenario.
-        self.num_loads = self.load_data.shape[0]
-        self.scenario_loads_off = \
-            (self.rng.random((num_scenarios, self.num_loads))
-             > load_on_probability)
-
-        # Draw initial loading levels. Loads which are "off" will be
-        # removed, and then each row will be scaled.
-        self.scenario_individual_loads_mw = \
-            self.rng.random((num_scenarios, self.num_loads))
-
-        # Zero out loads which are off.
-        self.scenario_individual_loads_mw[self.scenario_loads_off] = 0.0
-
-        # Scale each row to meet the appropriate scenario total loading.
-        # First, get our vector of scaling factors (factor per row).
-        scale_factor_vector = (
-            self.scenario_total_loads_mw
-            / self.scenario_individual_loads_mw.sum(axis=1)
-        )
-
-        # Then, multiply each element in each row by its respective
-        # scaling factor. The indexing with None creates an additional
-        # dimension to our vector to allow for that element-wise
-        # scaling.
-        self.scenario_individual_loads_mw = (
-                self.scenario_individual_loads_mw
-                * scale_factor_vector[:, None]
-        )
-
-        # Now, come up with reactive power levels for each load based
-        # on the minimum power factor.
-        pf = self.rng.uniform(min_load_pf, 1,
-                              (num_scenarios, self.num_loads))
-
-        # Q = P * tan(arccos(pf))
-        self.scenario_individual_loads_mvar = (
-            self.scenario_individual_loads_mw
-            * np.tan(np.arccos(pf))
-        )
-
-        # Possibly flip the sign of the reactive power for some loads
-        # in order to make their power factor leading.
-        lead = (self.rng.random((num_scenarios, self.num_loads))
-                < lead_pf_probability)
-        self.scenario_individual_loads_mvar[lead] *= -1
-
+        ################################################################
+        # Scenario/episode initialization: generation
+        ################################################################
         # Now, we'll take a similar procedure to set up generation
         # levels. Unfortunately, this is a tad more complex since we
         # have upper and lower limits.
         #
-        # Initialize the generator power levels to 0.
-        self.scenario_gen_mw = np.zeros(
-            (num_scenarios, self.num_gens))
+        self.gen_mw = self._compute_generation()
 
-        # Initialize indices that we'll be shuffling.
-        gen_indices = np.arange(0, self.num_gens)
-
-        # Loop over each scenario.
-        # TODO: this should be vectorized.
-        # TODO: should we instead draw which generators are on like
-        #   what's done with the load? It'll have similar issues.
-        for scenario_idx in range(num_scenarios):
-            # Draw random indices for generators. In this way, we'll
-            # start with a different generator each time.
-            self.rng.shuffle(gen_indices)
-
-            # Get our total load for this scenario. We'll decrement
-            # it as we add generation.
-            load = self.scenario_total_loads_mw[scenario_idx]
-
-            # Randomly draw generation until we meet the load.
-            # The while loop is here in case we "under draw" generation
-            # such that generation < load.
-            i = 0
-            while (abs(self.scenario_gen_mw[scenario_idx, :].sum() - load)
-                    > GEN_LOAD_DELTA_TOL) and (i < ITERATION_MAX):
-
-                # Ensure generation is zeroed out from the last
-                # last iteration of the loop.
-                self.scenario_gen_mw[scenario_idx, :] = 0.0
-
-                # For each generator, draw a power level between its
-                # minimum and maximum.
-                for gen_idx in gen_indices:
-                    # Compute the total generation for this scenario
-                    # at this point in time.
-                    gen_total = self.scenario_gen_mw[scenario_idx, :].sum()
-
-                    # Extract the minimum for this generator.
-                    gen_min = self.gen_data.iloc[gen_idx]['GenMWMin']
-
-                    # The max will be the minimum of the load and the
-                    # generator's maximum.
-                    gen_max = min(self.gen_data.iloc[gen_idx]['GenMWMax'],
-                                  load)
-
-                    # Draw for this generator.
-                    gen_mw = self.rng.uniform(gen_min, gen_max)
-
-                    # Place the generation in the appropriate spot.
-                    if (gen_mw + gen_total) > load:
-                        # Generation cannot exceed load. Set this
-                        # generator power output to the remaining load
-                        # and break out of the loop. This will keep the
-                        # remaining generators at 0.
-                        self.scenario_gen_mw[scenario_idx, gen_idx] = \
-                            load - gen_total
-                        break
-                    else:
-                        # Use the randomly drawn gen_mw.
-                        self.scenario_gen_mw[scenario_idx, gen_idx] = gen_mw
-
-                i += 1
-
-            if i >= ITERATION_MAX:
-                # TODO: better exception.
-                raise UserWarning(f'Iterations exceeded {ITERATION_MAX}')
-
-            self.log.debug(f'It took {i} iterations to create generation for '
-                           f'scenario {scenario_idx}')
-
+        ################################################################
+        # Action space definition
+        ################################################################
         # Create action space by discretizing generator set points.
         self.action_space = spaces.Discrete(self.num_gens
                                             * num_gen_voltage_bins)
@@ -331,7 +261,7 @@ class VoltageControlEnv(gym.Env):
 
         # Columns we'll use for voltage control with SAW's
         # ChangeParametersSingleElement.
-        self.gen_voltage_control_fields = gen_key_fields + volt_set
+        self.gen_voltage_control_fields = self.gen_key_fields + ['GenVoltSet']
 
         # Now, map each action to a generator set-point.
         self.action_map = dict()
@@ -341,13 +271,17 @@ class VoltageControlEnv(gym.Env):
         for gen_data_idx in self.gen_data.index:
             # Extract the identifying information for this generator.
             gen_key_values = \
-                self.gen_data.loc[gen_data_idx, gen_key_fields].tolist()
+                self.gen_data.loc[gen_data_idx, self.gen_key_fields].tolist()
 
             # Create a list compatible with
             # SAW.ChangeParametersSingleElement for each voltage level.
             for v in self.gen_bins:
                 self.action_map[i] = gen_key_values + [v]
                 i += 1
+
+        ################################################################
+        # Observation space definition
+        ################################################################
 
         # Time for the observation space. This will include:
         #   - bus voltages
@@ -374,8 +308,9 @@ class VoltageControlEnv(gym.Env):
         # TODO: Remove this stuff.
         # Open generators which have 0 real power set.
         zero_mw = self.gen_data['GenMW'] == 0
-        subset = self.gen_data.loc[:, gen_key_fields + ['GenMW', 'GenStatus']]
-        subset['GenStatus'] = subset['GenMW'].map(gen_numeric_status_map)
+        subset = self.gen_data.loc[:, self.gen_key_fields
+                                      + ['GenMW', 'GenStatus']]
+        subset.loc[zero_mw, 'GenStatus'] = 'Open'
         self.saw.change_and_confirm_params_multiple_element(
             ObjectType='gen', command_df=subset)
         self.saw.SolvePowerFlow()
@@ -391,6 +326,158 @@ class VoltageControlEnv(gym.Env):
     #     """
     #     self.np_random, seed = seeding.np_random(seed)
     #     return [seed]
+
+    def _zero_negative_gen_mw_limits(self):
+        """Helper to zero out generator MW limits which are < 0."""
+        gen_less_0 = self.gen_data['GenMWMin'] < 0
+        if (self.gen_data['GenMWMin'] < 0).any():
+            self.gen_data.loc[gen_less_0, 'GenMWMin'] = 0.0
+            self.saw.change_and_confirm_params_multiple_element(
+                'gen', self.gen_data.loc[:, self.gen_key_fields
+                                            + ['GenMWMin']])
+            self.log.warning(f'{gen_less_0.sum()} generators with '
+                             'GenMWMin < 0 have had GenMWMin set to 0.')
+
+    def _zero_i_z_loads(self):
+        """Helper to zero out constant current and constant impedance
+        portions of loads.
+        """
+        # Warn if we have constant current or constant impedance load
+        # values. Then, zero out the constant current and constant
+        # impedance portions.
+        if (self.load_data[LOAD_I_Z] != 0.0).any().any():
+            self.log.warning('The given PowerWorld case has loads with '
+                             'non-zero constant current and constant impedance'
+                             ' portions. These will be zeroed out.')
+            self.load_data.loc[:, LOAD_I_Z] = 0.0
+            self.saw.change_and_confirm_params_multiple_element(
+                'Load', self.load_data.loc[:, self.load_key_fields + LOAD_I_Z])
+
+    def _compute_loading(self, load_on_probability,
+                         min_load_pf, lead_pf_probability):
+        # Define load array shape for convenience.
+        shape = (self.num_scenarios, self.num_loads)
+
+        # Draw an active power loading condition for each case.
+        scenario_total_loads_mw = \
+            np.zeros(self.num_scenarios, dtype=self.dtype)
+        scenario_total_loads_mw[:] = self.rng.uniform(
+            self.min_load_mw, self.max_load_mw, self.num_scenarios
+        )
+
+        # Draw to determine which loads will be "on" for each scenario.
+        scenario_loads_off = \
+            self.rng.random(shape, dtype=self.dtype) > load_on_probability
+
+        # Draw initial loading levels. Loads which are "off" will be
+        # removed, and then each row will be scaled.
+        scenario_individual_loads_mw = self.rng.random(shape, dtype=self.dtype)
+
+        # Zero out loads which are off.
+        scenario_individual_loads_mw[scenario_loads_off] = 0.0
+
+        # Scale each row to meet the appropriate scenario total loading.
+        # First, get our vector of scaling factors (factor per row).
+        scale_factor_vector = scenario_total_loads_mw \
+            / scenario_individual_loads_mw.sum(axis=1)
+
+        # Then, multiply each element in each row by its respective
+        # scaling factor. The indexing with None creates an additional
+        # dimension to our vector to allow for that element-wise
+        # scaling.
+        scenario_individual_loads_mw = (
+                scenario_individual_loads_mw * scale_factor_vector[:, None]
+        )
+
+        # Now, come up with reactive power levels for each load based
+        # on the minimum power factor.
+        # Start by randomly generating power factors for each load for
+        # each scenario.
+        pf = np.zeros(shape, dtype=self.dtype)
+        pf[:] = self.rng.uniform(min_load_pf, 1, shape)
+
+        # Use the power factor and MW to get Mvars.
+        # Q = P * tan(arccos(pf))
+        scenario_individual_loads_mvar = (
+                scenario_individual_loads_mw * np.tan(np.arccos(pf)))
+
+        # Possibly flip the sign of the reactive power for some loads
+        # in order to make their power factor leading.
+        lead = self.rng.random(shape, dtype=self.dtype) < lead_pf_probability
+        scenario_individual_loads_mvar[lead] *= -1
+
+        return scenario_total_loads_mw, scenario_individual_loads_mw, \
+            scenario_individual_loads_mvar
+
+    def _compute_generation(self):
+        # Initialize the generator power levels to 0.
+        scenario_gen_mw = np.zeros((self.num_scenarios, self.num_gens))
+
+        # Initialize indices that we'll be shuffling.
+        gen_indices = np.arange(0, self.num_gens)
+
+        # Loop over each scenario.
+        # TODO: this should be vectorized.
+        # TODO: should we instead draw which generators are on like
+        #   what's done with the load? It'll have similar issues.
+        for scenario_idx in range(self.num_scenarios):
+            # Draw random indices for generators. In this way, we'll
+            # start with a different generator each time.
+            self.rng.shuffle(gen_indices)
+
+            # Get our total load for this scenario.
+            load = self.total_load_mw[scenario_idx]
+
+            # Randomly draw generation until we meet the load.
+            # The while loop is here in case we "under draw" generation
+            # such that generation < load.
+            i = 0
+            while (abs(scenario_gen_mw[scenario_idx, :].sum() - load)
+                   > GEN_LOAD_DELTA_TOL) and (i < ITERATION_MAX):
+
+                # Ensure generation is zeroed out from the last
+                # last iteration of the loop.
+                scenario_gen_mw[scenario_idx, :] = 0.0
+
+                # Initialize the generation total to 0.
+                gen_total = 0
+
+                # For each generator, draw a power level between its
+                # minimum and maximum.
+                for gen_idx in gen_indices:
+                    # Draw generation between this generator's minimum
+                    # and the minimum of the generator's maximum and
+                    # load.
+                    gen_mw = self.rng.uniform(
+                        self.gen_data.iloc[gen_idx]['GenMWMin'],
+                        min(self.gen_data.iloc[gen_idx]['GenMWMax'], load))
+
+                    # Place the generation in the appropriate spot.
+                    if (gen_mw + gen_total) > load:
+                        # Generation cannot exceed load. Set this
+                        # generator power output to the remaining load
+                        # and break out of the loop. This will keep the
+                        # remaining generators at 0.
+                        scenario_gen_mw[scenario_idx, gen_idx] = \
+                            load - gen_total
+                        break
+                    else:
+                        # Use the randomly drawn gen_mw.
+                        scenario_gen_mw[scenario_idx, gen_idx] = gen_mw
+
+                    # Increment the generation total.
+                    gen_total += gen_mw
+
+                i += 1
+
+            if i >= ITERATION_MAX:
+                # TODO: better exception.
+                raise UserWarning(f'Iterations exceeded {ITERATION_MAX}')
+
+            self.log.debug(f'It took {i} iterations to create generation for '
+                           f'scenario {scenario_idx}')
+
+        return scenario_gen_mw
 
     def render(self, mode='human'):
         """Not planning to implement this for now. However, it could
@@ -428,7 +515,7 @@ class VoltageControlEnv(gym.Env):
 
         # Assign the load voltage data.
         out[self.bus_v_indices[0]:self.bus_v_indices[1]] = \
-            bus_voltage[self.vpu_field].to_numpy(dtype=self.dtype)
+            bus_voltage['BusPUVolt'].to_numpy(dtype=self.dtype)
 
         # Set generator voltage set points.
         out[self.gen_v_indices[0]:self.gen_v_indices[1]] = \
@@ -437,13 +524,9 @@ class VoltageControlEnv(gym.Env):
         # Compute and assign power factor for the generators. Set the
         # power factor equal to 1 where generators are off.
         # pf = P / |S|
-        s_mag = np.sqrt((gen_data['GenMW'] ** 2
-                         + gen_data['GenMVR'] ** 2).to_numpy(dtype=self.dtype))
-
         out[self.gen_pf_indices[0]:self.gen_pf_indices[1]] = \
-            np.divide(gen_data['GenMW'].to_numpy(dtype=self.dtype), s_mag,
-                      out=out[self.gen_pf_indices[0]:self.gen_pf_indices[1]],
-                      where=s_mag > 0)
+            (gen_data['GenMW'] / gen_data['GenMVA']).fillna(1).to_numpy(
+            dtype=self.dtype)
 
         # Assign percentage MVR loading for generators.
         out[self.gen_var_indices[0]:self.gen_var_indices[1]] = \

@@ -69,29 +69,26 @@ class VoltageControlEnvInitializationTestCase(unittest.TestCase):
 
         # Ensure dimensionality of loads match up.
         load_dim = (num_scenarios, N_LOADS_14)
-        self.assertEqual(load_dim, env.scenario_individual_loads_mw.shape)
-        self.assertEqual(load_dim, env.scenario_individual_loads_mvar.shape)
+        self.assertEqual(load_dim, env.loads_mw.shape)
+        self.assertEqual(load_dim, env.loads_mvar.shape)
 
         # Ensure the individual loads match total loading.
-        np_test.assert_allclose(env.scenario_individual_loads_mw.sum(axis=1),
-                                env.scenario_total_loads_mw)
+        np_test.assert_allclose(env.loads_mw.sum(axis=1), env.total_load_mw,
+                                rtol=1e-6)
 
         # Ensure all loads are less than the maximum.
-        np_test.assert_array_less(env.scenario_total_loads_mw,
-                                  env.max_load_mw)
+        np_test.assert_array_less(env.total_load_mw, env.max_load_mw)
 
         # Ensure all loads are greater than the minimum.
-        np_test.assert_array_less(env.min_load_mw,
-                                  env.scenario_total_loads_mw)
+        np_test.assert_array_less(env.min_load_mw, env.total_load_mw)
 
         # Ensure all power factors are valid. pf = P / |S|
-        s_mag = np.sqrt(np.square(env.scenario_individual_loads_mw)
-                        + np.square(env.scenario_individual_loads_mvar))
+        s_mag = np.sqrt(np.square(env.loads_mw) + np.square(env.loads_mvar))
 
         # Suppress numpy warnings - we'll be replacing NaNs.
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            pf = env.scenario_individual_loads_mw / s_mag
+            pf = env.loads_mw / s_mag
 
         # For sake of testing, set loads with 0 power to have a
         # power factor of 1.
@@ -99,19 +96,19 @@ class VoltageControlEnvInitializationTestCase(unittest.TestCase):
         np_test.assert_array_less(min_load_pf, pf)
 
         # Ensure our proportion of negative loads is appropriate.
-        neg_sum = (env.scenario_individual_loads_mvar < 0).sum()
+        neg_sum = (env.loads_mvar < 0).sum()
         total_elements = num_scenarios * N_LOADS_14
         self.assertLessEqual(neg_sum / total_elements, lead_pf_probability)
 
         # Ensure generation matches load to within the given tolerance.
         np_test.assert_array_less(
-            env.scenario_gen_mw.sum(axis=1) - env.scenario_total_loads_mw,
+            env.gen_mw.sum(axis=1) - env.total_load_mw,
             voltage_control_env.GEN_LOAD_DELTA_TOL
         )
 
         # Ensure generator outputs are within bounds.
         for gen_idx, row in enumerate(env.gen_data.itertuples()):
-            gen_output = env.scenario_gen_mw[:, gen_idx]
+            gen_output = env.gen_mw[:, gen_idx]
             # noinspection PyUnresolvedReferences
             self.assertTrue((gen_output <= row.GenMWMax).all())
             # noinspection PyUnresolvedReferences
