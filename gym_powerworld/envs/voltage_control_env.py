@@ -11,7 +11,7 @@ from typing import Union, Tuple
 # pick up this rounding error - that's okay.
 GEN_LOAD_DELTA_TOL = 0.001
 
-# For safety we'll have a maximum number of loop iteration.
+# For safety we'll have a maximum number of loop iterations.
 ITERATION_MAX = 100
 
 # Constants related to PowerWorld (for convenience and cleanliness):
@@ -35,7 +35,7 @@ class VoltageControlEnv(gym.Env):
 
     # PowerWorld generator fields which will be used when generating
     # an observation during a time step.
-    GEN_OBS_FIELDS = ['GenMW', 'GenMVA', 'GenVoltSet', 'GenMVRPercent',
+    GEN_OBS_FIELDS = ['GenMW', 'GenMWMax', 'GenMVA', 'GenMVRPercent',
                       'GenStatus']
 
     # All PowerWorld load fields that will be used during environment
@@ -45,7 +45,7 @@ class VoltageControlEnv(gym.Env):
     # PowerWorld load fields that will be used when generating an
     # observation during a time step. Voltage will be handled at the
     # bus level rather than the load level.
-    LOAD_OBS_FIELDS = LOAD_P
+    LOAD_OBS_FIELDS = LOAD_P + ['PowerFactor']
 
     # Bus fields for environment initialization will simply be the
     # key fields, which are not listed here. During a time step, we'll
@@ -53,14 +53,14 @@ class VoltageControlEnv(gym.Env):
     BUS_OBS_FIELDS = ['BusPUVolt']
 
     def __init__(self, pwb_path: str, num_scenarios: int,
-                 max_load_factor: Union[str, float] = None,
-                 min_load_factor: Union[str, float] = None,
+                 max_load_factor: float = None,
+                 min_load_factor: float = None,
                  min_load_pf: float = 0.8,
                  lead_pf_probability: float = 0.1,
                  load_on_probability: float = 0.8,
                  num_gen_voltage_bins: int = 5,
                  gen_voltage_range: Tuple[float, float] = (0.9, 1.1),
-                 seed: Union[str, float] = None,
+                 seed: float = None,
                  log_level=logging.INFO,
                  dtype=np.float32):
         """
@@ -74,17 +74,18 @@ class VoltageControlEnv(gym.Env):
             num_scenarios.
         :param max_load_factor: Factor which when multiplied by the
             current total system load represents the maximum allowable
-            system load for training states. E.g., if the current sum
-            of all the loads is 100MVA and the max_load_factor is
-            2, then the maximum possible loading in a training state
-            will be 200MVA. If the max_load_factor is None, the maximum
+            system loading for training episodes in MW. E.g., if the
+            current sum of all the active power components of the loads
+            is 100 MW and the max_load_factor is 2, then the maximum
+            possible active power loading for any given episode will be
+            200 MW. If the max_load_factor is None, the maximum
             system loading will be computed by the sum of generator
             maximum MW outputs.
         :param min_load_factor: Similar to the max_load_factor, this
             number is multiplied with the current total system load to
-            determine the minimum loading for a training state. If None,
-            the minimum system loading will be computed by the sum of
-            generator minimum MW outputs.
+            determine the minimum active power loading for an episode.
+            If None, the minimum system loading will be computed by the
+            sum of generator minimum MW outputs.
         :param min_load_pf: Minimum load power factor to be used when
             generating loading scenarios. Should be a positive number
             in the interval (0, 1].
@@ -97,16 +98,18 @@ class VoltageControlEnv(gym.Env):
             on the interval (0, 1].
         :param num_gen_voltage_bins: Number of intervals/bins to split
             generator voltage set points into. I.e.,
-            if gen_voltage_range=(0.95, 1.05) and gen_bins is 5, the
-            generator set points will be discretized into the set
-            {0.95, 0.975, 1.0, 1.025, 1.05}.
+            if gen_voltage_range=(0.95, 1.05) and num_gen_voltage_bins
+            is 5, the generator set points will be discretized into the
+            set {0.95, 0.975, 1.0, 1.025, 1.05}.
         :param gen_voltage_range: Minimum and maximum allowed generator
             voltage regulation set points (in per unit).
         :param seed: Seed for random number.
         :param log_level: Log level for the environment's logger. Pass
             a constant from the logging module, e.g. logging.DEBUG or
             logging.INFO.
-        :param dtype: Numpy datatype for observations.
+        :param dtype: Numpy datatype to be used for most numbers. It's
+            common to use np.float32 for machine learning tasks to
+            reduce memory consumption.
         """
         ################################################################
         # Logging, seeding, SAW initialization, simple attributes
@@ -133,7 +136,8 @@ class VoltageControlEnv(gym.Env):
         # Get generator data.
         # Start by getting a listing of the key fields.
         self.gen_key_fields = self.saw.get_key_field_list('gen')
-        # Define all the parameters we'll need for setup.
+
+        # Define all the parameters we'll need for initialization.
         self.gen_fields = self.gen_key_fields + self.GEN_FIELDS
 
         # The following fields will be used for observations during
@@ -147,14 +151,17 @@ class VoltageControlEnv(gym.Env):
         # For convenience, get the number of generators.
         self.num_gens = self.gen_data.shape[0]
 
-        # Zero out negative minimum generation.
+        # Zero out negative minimum generation limits. A warning will
+        # be emitted if generators have negative limits.
         self._zero_negative_gen_mw_limits()
 
-        # For convenience, compute the maximum generation capacity. This
-        # will also represent maximum loading.
+        # For convenience, compute the maximum generation capacity.
+        # Depending on max_load_factor, gen_mw_capacity could also
+        # represent maximum loading.
         # TODO: Confirm that the produce/consume convention is correct.
         self.gen_mw_capacity = self.gen_data['GenMWMax'].sum()
         self.gen_mvar_produce_capacity = self.gen_data['GenMVRMax'].sum()
+        # TODO: Should we use abs here?
         self.gen_mvar_consume_capacity = self.gen_data['GenMVRMin'].sum()
 
         ################################################################
@@ -165,33 +172,41 @@ class VoltageControlEnv(gym.Env):
         #   are ZIP.
         # Get key fields for loads.
         self.load_key_fields = self.saw.get_key_field_list('load')
+
+        # Combine key fields and all fields needed for initialization.
         self.load_fields = self.load_key_fields + self.LOAD_FIELDS
+
         # Query PowerWorld for the load data.
         self.load_data = self.saw.GetParametersMultipleElement(
             ObjectType='load', ParamList=self.load_fields)
 
-        # Number of loads for convenience.
+        # Total number of loads for convenience.
         self.num_loads = self.load_data.shape[0]
 
         # The following fields will be used for observations.
         self.load_obs_fields = self.load_key_fields + self.LOAD_OBS_FIELDS
 
         # Zero out constant current and constant impedance portions so
-        # we simply have constant power.
-        # TODO: in the future, different loads should be considered.
+        # we simply have constant power. A warning will be emitted if
+        # there are loads with non-zero constant current or impedance
+        # portions.
+        # TODO: in the future, we should allow for loads beyond constant
+        #  power.
         self._zero_i_z_loads()
 
         ################################################################
         # Bus fields and data
         ################################################################
-        # Get bus data.
+        # Get bus key fields.
         self.bus_key_fields = self.saw.get_key_field_list('bus')
 
         # The following fields will be used for observations.
         self.bus_obs_fields = self.bus_key_fields + ['BusPUVolt']
+
         # Get bus data from PowerWorld.
         self.bus_data = self.saw.GetParametersMultipleElement(
             ObjectType='bus', ParamList=self.bus_key_fields)
+
         # For convenience, track number of buses.
         self.num_buses = self.bus_data.shape[0]
 
@@ -204,27 +219,26 @@ class VoltageControlEnv(gym.Env):
             # system load.
             self.max_load_mw = \
                 self.load_data['LoadSMW'].sum() * max_load_factor
+
+            # Ensure the maximum loading is <= generation capacity.
+            self._check_max_load(max_load_factor)
         else:
-            # If not given a max load factor, compute the maximum load
-            # as the sum of the generator maximums.
+            # If not given a max load factor, the maximum loading will
+            # simply be generation capacity.
             self.max_load_mw = self.gen_mw_capacity
 
         # Compute minimum system loading.
         if min_load_factor is not None:
             self.min_load_mw = \
                 self.load_data['LoadSMW'].sum() * min_load_factor
-        else:
-            self.min_load_mw = self.gen_data['GenMWMin'].sum()
 
-        # Warn if our generation capacity is more than double the max
-        # load - this could mean generator maxes aren't realistic.
-        gen_factor = self.gen_mw_capacity / self.max_load_mw
-        if gen_factor >= 2:
-            self.log.warning(
-                f'The given generator capacity, {self.gen_mw_capacity:.2f} MW,'
-                f' is {gen_factor:.2f} times larger than the maximum load, '
-                f'{self.max_load_mw:.2f} MW. This could indicate that '
-                'the case does not have proper generator limits set up.')
+            # Ensure the minimum loading is feasible based on the
+            # generation.
+            self._check_min_load(min_load_factor)
+        else:
+            # If not given a min load factor, minimum loading is simply
+            # the minimum generation of minimum generation.
+            self.min_load_mw = self.gen_data['GenMWMin'].min()
 
         ################################################################
         # Scenario/episode initialization: loads
@@ -234,6 +248,8 @@ class VoltageControlEnv(gym.Env):
         # scenarios.
         self.scenarios = []
 
+        # Compute total loading and loading for each individual load
+        # for all scenarios.
         self.total_load_mw, self.loads_mw, self.loads_mvar = \
             self._compute_loading(load_on_probability=load_on_probability,
                                   min_load_pf=min_load_pf,
@@ -242,10 +258,8 @@ class VoltageControlEnv(gym.Env):
         ################################################################
         # Scenario/episode initialization: generation
         ################################################################
-        # Now, we'll take a similar procedure to set up generation
-        # levels. Unfortunately, this is a tad more complex since we
-        # have upper and lower limits.
-        #
+        # Compute each individual generator's active power contribution
+        # for each loading scenario.
         self.gen_mw = self._compute_generation()
 
         ################################################################
@@ -255,29 +269,34 @@ class VoltageControlEnv(gym.Env):
         self.action_space = spaces.Discrete(self.num_gens
                                             * num_gen_voltage_bins)
 
-        # Create the generator bins.
+        # Now, map each element in the action space to a generator
+        # set point.
+        #
+        # Start by creating the generator bins.
         self.gen_bins = np.linspace(gen_voltage_range[0], gen_voltage_range[1],
                                     num_gen_voltage_bins)
 
-        # Columns we'll use for voltage control with SAW's
-        # ChangeParametersSingleElement.
-        self.gen_voltage_control_fields = self.gen_key_fields + ['GenVoltSet']
+        # The action array is a simple mapping array which corresponds
+        # 1:1 with the action_space. Each row represents an action,
+        # and within each row is an index into self.gen_data and into
+        # self.gen_bins, respectively. Note: if we need to really trim
+        # memory use, the mapping can be computed on the fly rather
+        # than stored in an array. For now, let's stick with a simple
+        # approach.
+        self.action_array = np.zeros(shape=(self.action_space.n, 2),
+                                     dtype=int)
 
-        # Now, map each action to a generator set-point.
-        self.action_map = dict()
+        # Repeat the generator indices in the first column of the
+        # action_array.
+        self.action_array[:, 0] = np.tile(self.gen_data.index.to_numpy(),
+                                          num_gen_voltage_bins)
 
-        i = 0
-        # Loop over the index.
-        for gen_data_idx in self.gen_data.index:
-            # Extract the identifying information for this generator.
-            gen_key_values = \
-                self.gen_data.loc[gen_data_idx, self.gen_key_fields].tolist()
-
-            # Create a list compatible with
-            # SAW.ChangeParametersSingleElement for each voltage level.
-            for v in self.gen_bins:
-                self.action_map[i] = gen_key_values + [v]
-                i += 1
+        # Create indices into self.gen_bins in the second column.
+        # It feels like this could be better vectorized, but this should
+        # be close enough.
+        for i in range(num_gen_voltage_bins):
+            self.action_array[
+                i * num_gen_voltage_bins:(i + 1) * num_gen_voltage_bins, 1] = i
 
         ################################################################
         # Observation space definition
@@ -285,25 +304,22 @@ class VoltageControlEnv(gym.Env):
 
         # Time for the observation space. This will include:
         #   - bus voltages
-        #   - generator voltage set points
+        #   - generator active power output divided by maximum active
+        #       power output
         #   - generator power factor
         #   - generator portion of maximum reactive power
-        #   - generator status
+        #   - load level (MW) divided by maximum MW loading
+        #   - load power factor
+        #   - flag (0/1) for if load power factor is lagging/leading
+        #
+        # We'll leave out a flag for generator lead/lag, because they
+        # will almost always be producing rather than consuming vars.
+        # May want to change this in the future.
         # TODO: How best to handle low/high? Could use independent
         #   bounds for each observation type.
-        self.num_obs = self.num_buses + 4 * self.num_gens
+        self.num_obs = self.num_buses + 3 * self.num_gens + 3 * self.num_loads
         self.observation_space = spaces.Box(
-            low=0.9, high=1.2, shape=(self.num_obs,), dtype=self.dtype)
-
-        # Create indices for the various components of the observations.
-        self.bus_v_indices = (0, self.num_buses)
-        self.gen_v_indices = (self.num_buses, self.num_buses + self.num_gens)
-        self.gen_pf_indices = (self.num_buses + self.num_gens,
-                               self.num_buses + 2 * self.num_gens)
-        self.gen_var_indices = (self.num_buses + 2 * self.num_gens,
-                                self.num_buses + 3 * self.num_gens)
-        self.gen_status_indices = (self.num_buses + 3 * self.num_gens,
-                                   self.num_buses + 4 * self.num_gens)
+            low=0, high=1, shape=(self.num_obs,), dtype=self.dtype)
 
         # TODO: Remove this stuff.
         # Open generators which have 0 real power set.
@@ -353,12 +369,52 @@ class VoltageControlEnv(gym.Env):
             self.saw.change_and_confirm_params_multiple_element(
                 'Load', self.load_data.loc[:, self.load_key_fields + LOAD_I_Z])
 
+    def _check_max_load(self, max_load_factor):
+        """Ensure maximum loading is less than generation capacity. Also
+        warn if generation capacity is >= 2 * maximum loading.
+        """
+        if self.max_load_mw > self.gen_mw_capacity:
+            # TODO: Better exception.
+            raise UserWarning(
+                f'The given max_load_factor, {max_load_factor:.3f} '
+                f'resulted in maximum loading of {self.max_load_mw:.3f} MW'
+                ', but the generator active power capacity is only '
+                f'{self.gen_mw_capacity:.3f} MW. Reduce the '
+                'max_load_factor and try again.')
+
+        # Warn if our generation capacity is more than double the max
+        # load - this could mean generator maxes aren't realistic.
+        gen_factor = self.gen_mw_capacity / self.max_load_mw
+        if gen_factor >= 2:
+            self.log.warning(
+                f'The given generator capacity, {self.gen_mw_capacity:.2f} MW,'
+                f' is {gen_factor:.2f} times larger than the maximum load, '
+                f'{self.max_load_mw:.2f} MW. This could indicate that '
+                'the case does not have proper generator limits set up.')
+
+    def _check_min_load(self, min_load_factor):
+        """Ensure minimum loading is greater than the minimum generator
+        minimum generation.
+        """
+        min_gen = self.gen_data['GenMWMin'].min()
+        if self.min_load_mw < min_gen:
+            # TODO: better exception.
+            raise UserWarning(
+                f'The given min_load_factor, {min_load_factor:.3f}, '
+                'results in a minimum system loading of '
+                f'{self.min_load_mw:3f} MW, but the lowest generation '
+                f'possible is {min_gen:.3f} MW. Increase the '
+                'min_load_factor and try again.')
+
     def _compute_loading(self, load_on_probability,
                          min_load_pf, lead_pf_probability):
         # Define load array shape for convenience.
         shape = (self.num_scenarios, self.num_loads)
 
-        # Draw an active power loading condition for each case.
+        # Randomly draw an active power loading condition for each
+        # episode from the uniform distribution between min load and
+        # max load.
+        # Initialize then fill the array to get the proper data type.
         scenario_total_loads_mw = \
             np.zeros(self.num_scenarios, dtype=self.dtype)
         scenario_total_loads_mw[:] = self.rng.uniform(
@@ -502,53 +558,36 @@ class VoltageControlEnv(gym.Env):
         """Helper to return an observation. For the given simulation,
         the power flow should already have been solved.
         """
-        # Start by getting bus voltages.
+        # Get bus, generator, and load data from PowerWorld.
         bus_voltage = self.saw.GetParametersMultipleElement(
             ObjectType='bus', ParamList=self.bus_obs_fields)
-
-        # Now, get all relevant generator data.
         gen_data = self.saw.GetParametersMultipleElement(
             ObjectType='gen', ParamList=self.gen_obs_fields)
+        load_data = self.saw.GetParametersMultipleElement(
+            ObjectType='load', ParamList=self.load_obs_fields
+        )
 
-        # Initialize return.
-        out = np.ones(self.num_obs, dtype=self.dtype)
+        # Add a column to load_data for power factor lead/lag
+        load_data['lead'] = (load_data['LoadSMVR'] < 0).astype(self.dtype)
 
-        # Assign the load voltage data.
-        out[self.bus_v_indices[0]:self.bus_v_indices[1]] = \
-            bus_voltage['BusPUVolt'].to_numpy(dtype=self.dtype)
-
-        # Set generator voltage set points.
-        out[self.gen_v_indices[0]:self.gen_v_indices[1]] = \
-            gen_data['GenVoltSet'].to_numpy(dtype=self.dtype)
-
-        # Compute and assign power factor for the generators. Set the
-        # power factor equal to 1 where generators are off.
-        # pf = P / |S|
-        out[self.gen_pf_indices[0]:self.gen_pf_indices[1]] = \
+        # Create observation by concatenating the relevant data. No
+        # need to scale per unit data.
+        return np.concatenate([
+            # Bus voltages.
+            bus_voltage['BusPUVolt'].to_numpy(dtype=self.dtype),
+            # Generator active power divide by maximum active power.
+            (gen_data['GenMW'] / gen_data['GenMWMax']).to_numpy(
+                dtype=self.dtype),
+            # Generator power factor.
             (gen_data['GenMW'] / gen_data['GenMVA']).fillna(1).to_numpy(
-            dtype=self.dtype)
-
-        # Assign percentage MVR loading for generators.
-        out[self.gen_var_indices[0]:self.gen_var_indices[1]] = \
-            gen_data['GenMVRPercent'].to_numpy(dtype=self.dtype) / 100
-
-        # Assign status.
-        out[self.gen_status_indices[0]:self.gen_status_indices[1]] = \
-            gen_data['GenStatus'].map(gen_numeric_status_map).to_numpy(
-                dtype=self.dtype)
-
-        # All done.
-        return out
-
-
-def gen_numeric_status_map(x: str):
-    """Map for generator states: closed --> 1, open --> 0
-
-    :param x: Generator status, either 'Open' or 'Closed' (case
-        insensitive).
-    :returns: 1 if open, 0 if closed.
-    """
-    if x.lower() == 'closed':
-        return 1
-    else:
-        return 0
+                dtype=self.dtype),
+            # Generator var loading.
+            gen_data['GenMVRPercent'].to_numpy(dtype=self.dtype) / 100,
+            # Load MW consumption divided by maximum MW loading.
+            (load_data['LoadSMW'] / self.max_load_mw).to_numpy(
+                dtype=self.dtype),
+            # Load power factor.
+            load_data['PowerFactor'].to_numpy(dtype=self.dtype),
+            # Flag for leading power factors.
+            load_data['lead'].to_numpy(dtype=self.dtype)
+        ])
