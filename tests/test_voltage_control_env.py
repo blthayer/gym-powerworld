@@ -114,6 +114,9 @@ class VoltageControlEnvInitializationTestCase(unittest.TestCase):
             # noinspection PyUnresolvedReferences
             self.assertTrue((gen_output >= row.GenMWMin).all())
 
+        env.reset()
+        env.step(7)
+
 
 if __name__ == '__main__':
     unittest.main()
