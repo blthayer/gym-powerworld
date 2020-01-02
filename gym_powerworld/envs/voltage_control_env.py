@@ -23,6 +23,9 @@ LOAD_P = ['LoadSMW', 'LoadSMVR']
 # loads.
 LOAD_I_Z = ['LoadIMW', 'LoadIMVR', 'LoadZMW', 'LoadZMVR']
 
+# Assumed transmission system losses as a fraction of energy delivered.
+LOSS = 0.03
+
 
 class VoltageControlEnv(gym.Env):
     """Environment for performing voltage control with the PowerWorld
@@ -127,15 +130,11 @@ class VoltageControlEnv(gym.Env):
         self.saw = SAW(pwb_path, early_bind=True)
         self.log.debug('PowerWorld case loaded.')
 
-        # Solve the initial power flow, and save the state for later
-        # loading.
-        self.saw.SolvePowerFlow()
-        self.saw.SaveState()
-
         # Track data type.
         self.dtype = dtype
 
-        # Number of scenarios/episodes to generate.
+        # Number of scenarios/episodes to generate. Note that not all
+        # will be usable.
         self.num_scenarios = num_scenarios
 
         # Scenario index starts at one, and is incremented for each
@@ -210,9 +209,11 @@ class VoltageControlEnv(gym.Env):
         ################################################################
         # Get bus key fields.
         self.bus_key_fields = self.saw.get_key_field_list('bus')
+        # We'll only be fetching the bus key fields initially.
+        self.bus_fields = self.bus_key_fields
 
         # The following fields will be used for observations.
-        self.bus_obs_fields = self.bus_key_fields + ['BusPUVolt']
+        self.bus_obs_fields = self.bus_key_fields + self.BUS_OBS_FIELDS
 
         # Get bus data from PowerWorld.
         self.bus_data = self.saw.GetParametersMultipleElement(
@@ -307,7 +308,7 @@ class VoltageControlEnv(gym.Env):
         # be close enough.
         for i in range(num_gen_voltage_bins):
             self.action_array[
-                i * num_gen_voltage_bins:(i + 1) * num_gen_voltage_bins, 1] = i
+                i * self.num_gens:(i + 1) * self.num_gens, 1] = i
 
         ################################################################
         # Observation space definition
@@ -345,6 +346,20 @@ class VoltageControlEnv(gym.Env):
         # as part of the stopping criteria.
         self.action_count = 0
 
+        ################################################################
+        # Solve power flow, save state.
+        ################################################################
+        # Solve the initial power flow, and save the state for later
+        # loading. This is done so that PowerWorld doesn't get stuck
+        # in a low voltage solution when moving from a bad case to a
+        # feasible case.
+        #
+        # Ensure this is the absolute LAST thing done
+        # in __init__ so that changes we've made to the case don't get
+        # overridden.
+        self.saw.SolvePowerFlow()
+        self.saw.SaveState()
+
         # All done.
 
     # def seed(self, seed=None):
@@ -361,7 +376,7 @@ class VoltageControlEnv(gym.Env):
             self.gen_data.loc[gen_less_0, 'GenMWMin'] = 0.0
             self.saw.change_and_confirm_params_multiple_element(
                 'gen', self.gen_data.loc[:, self.gen_key_fields
-                                            + ['GenMWMin']])
+                                         + ['GenMWMin']])
             self.log.warning(f'{gen_less_0.sum()} generators with '
                              'GenMWMin < 0 have had GenMWMin set to 0.')
 
@@ -492,8 +507,9 @@ class VoltageControlEnv(gym.Env):
             # start with a different generator each time.
             self.rng.shuffle(gen_indices)
 
-            # Get our total load for this scenario.
-            load = self.total_load_mw[scenario_idx]
+            # Get our total load for this scenario. Multiply by losses
+            # so the slack doesn't have to make up too much.
+            load = self.total_load_mw[scenario_idx] * (1 + LOSS)
 
             # Randomly draw generation until we meet the load.
             # The while loop is here in case we "under draw" generation
@@ -703,6 +719,7 @@ class VoltageControlEnv(gym.Env):
         return np.concatenate([
             # Bus voltages.
             self.bus_obs['BusPUVolt'].to_numpy(dtype=self.dtype),
+            # TODO: Bus voltage angles?
             # Generator active power divide by maximum active power.
             (self.gen_obs['GenMW'] / self.gen_obs['GenMWMax']).to_numpy(
                 dtype=self.dtype),
@@ -766,6 +783,8 @@ class VoltageControlEnv(gym.Env):
         reward += (v_delta[low_v] > 0).sum() * 10
         reward += (v_delta[high_v] < 0).sum() * 10
 
+        # TODO: penalize voltages that move outside of the band.
+
         # Check if all voltages are in range.
         if (low_v & high_v).sum() == 0:
             self.all_v_in_range = True
@@ -777,6 +796,7 @@ class VoltageControlEnv(gym.Env):
         var_delta = (self.gen_obs_prev['GenMVRPercent']
                      - self.gen_obs['GenMVRPercent'])
 
+        # TODO: reward tuning.
         reward += (var_delta * 10).sum()
 
         # All done.
