@@ -26,6 +26,12 @@ LOAD_I_Z = ['LoadIMW', 'LoadIMVR', 'LoadZMW', 'LoadZMVR']
 # Assumed transmission system losses as a fraction of energy delivered.
 LOSS = 0.03
 
+# Minimum allowed bus voltage (per unit) for a case. After solving the
+# power flow, voltages below this threshold will signify the case is
+# "bad." This will avoid weird behavior like PowerWorld converting loads
+# to constant current/impedance, etc.
+MIN_V = 0.75
+
 
 class VoltageControlEnv(gym.Env):
     """Environment for performing voltage control with the PowerWorld
@@ -42,6 +48,11 @@ class VoltageControlEnv(gym.Env):
     GEN_OBS_FIELDS = ['GenMW', 'GenMWMax', 'GenMVA', 'GenMVRPercent',
                       'GenStatus']
 
+    # Fields which will be used to modify the generators when calling
+    # the "reset" method, sans key fields.
+    # TODO: May need to add voltage set point here.
+    GEN_RESET_FIELDS = ['GenMW', 'GenStatus']
+
     # All PowerWorld load fields that will be used during environment
     # initialization, sans key fields.
     LOAD_FIELDS = LOAD_P + LOAD_I_Z
@@ -50,6 +61,10 @@ class VoltageControlEnv(gym.Env):
     # observation during a time step. Voltage will be handled at the
     # bus level rather than the load level.
     LOAD_OBS_FIELDS = LOAD_P + ['PowerFactor']
+
+    # Fields which will be used to modify the loads when calling the
+    # "reset" method, sans key fields.
+    LOAD_RESET_FIELDS = LOAD_P
 
     # Bus fields for environment initialization will simply be the
     # key fields, which are not listed here. During a time step, we'll
@@ -580,10 +595,11 @@ class VoltageControlEnv(gym.Env):
         # Reset the action counter.
         self.action_count = 0
 
-        # Extract a subset of the generator data.
-        gens = self.gen_data.loc[:, self.gen_key_fields + ['GenMW',
-                                                           'GenStatus']]
-        loads = self.load_data.loc[:, self.load_key_fields + LOAD_P]
+        # Extract a subset of the generator and load data.
+        gens = self.gen_data.loc[:, self.gen_key_fields
+                                 + self.GEN_RESET_FIELDS]
+        loads = self.load_data.loc[:, self.load_key_fields
+                                   + self.LOAD_RESET_FIELDS]
 
         # Flag for if the the case is "good".
         good = False
@@ -605,7 +621,8 @@ class VoltageControlEnv(gym.Env):
             gens.loc[gen_g_0, 'GenStatus'] = 'Closed'
             gens.loc[~gen_g_0, 'GenStatus'] = 'Open'
             # TODO: may want to use a faster command like
-            #   ChangeParametersMultipleElement
+            #   ChangeParametersMultipleElement. NOTE: Will need to
+            #   update patching in tests if this route is taken.
             self.saw.change_and_confirm_params_multiple_element('gen', gens)
 
             # Set load P/Q.
@@ -619,10 +636,10 @@ class VoltageControlEnv(gym.Env):
             except PowerWorldError:
                 # This scenario is bad. Move on.
                 self.log.debug(
-                    f'Scenario {self.scenario_idx} failed to solve.')
+                    f'Scenario {self.scenario_idx} failed.')
             else:
                 # Success! The power flow solved. Let's get an
-                # observation, which will give us some useful DataFrames
+                # observation, which will set some useful DataFrames
                 # for screening the case.
                 obs = self._get_observation()
 
@@ -637,7 +654,7 @@ class VoltageControlEnv(gym.Env):
                 #   at reactive power capability of generators vs.
                 #   load reactive power requirements. However, this
                 #   should probably be addressed in scenario creation.
-                if (self.bus_obs['BusPUVolt'] < 0.75).any():
+                if (self.bus_obs['BusPUVolt'] < MIN_V).any():
                     # Move on to the next loop iteration.
                     good = False
                 else:

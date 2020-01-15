@@ -1,14 +1,14 @@
 import unittest
 from unittest.mock import patch
 from gym_powerworld.envs import voltage_control_env
-from gym_powerworld.envs.voltage_control_env import LOSS
+from gym_powerworld.envs.voltage_control_env import LOSS, MIN_V
 import os
 import pandas as pd
 import numpy as np
 import numpy.testing as np_test
 import logging
 import warnings
-from esa import SAW
+from esa import SAW, PowerWorldError
 from gym.spaces import Discrete
 
 # Get full path to this directory.
@@ -392,6 +392,229 @@ class VoltageControlEnv14BusTestCase(unittest.TestCase):
     def test_action_count(self):
         """After initialization, the action count should be 0."""
         self.assertEqual(0, self.env.action_count)
+
+
+# noinspection DuplicatedCode
+class VoltageControlEnv14BusResetTestCase(unittest.TestCase):
+    """Test the reset method of the environment."""
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 1000
+        cls.max_load_factor = 2
+        cls.min_load_factor = 0.5
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.num_gen_voltage_bins = 9
+        cls.gen_voltage_range = (0.9, 1.1)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+
+        cls.env = voltage_control_env.VoltageControlEnv(
+            pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
+            max_load_factor=cls.max_load_factor,
+            min_load_factor=cls.min_load_factor,
+            min_load_pf=cls.min_load_pf,
+            lead_pf_probability=cls.lead_pf_probability,
+            load_on_probability=cls.load_on_probability,
+            num_gen_voltage_bins=cls.num_gen_voltage_bins,
+            gen_voltage_range=cls.gen_voltage_range,
+            seed=cls.seed,
+            log_level=logging.INFO,
+            dtype=cls.dtype
+        )
+
+        # For easy comparison with the original case, get a fresh SAW
+        # object. Do not make any changes to this, use only "get" type
+        # methods.
+        cls.saw = SAW(PWB_14, early_bind=True)
+
+        # Extract generator data needed for testing the reset method.
+        cls.gens = cls.saw.GetParametersMultipleElement(
+            ObjectType='gen',
+            ParamList=cls.env.gen_key_fields + cls.env.GEN_RESET_FIELDS)
+
+        # Extract generator data needed for testing the reset method.
+        cls.loads = cls.saw.GetParametersMultipleElement(
+            ObjectType='load',
+            ParamList=cls.env.load_key_fields + cls.env.LOAD_RESET_FIELDS
+        )
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.saw.exit()
+        cls.env.close()
+
+    def setUp(self) -> None:
+        """Reset the scenario index for each run."""
+        self.env.scenario_idx = 0
+
+    def test_scenario_idx_increments(self):
+        """Ensure subsequent calls to reset update the scenario index.
+        """
+        # Patch the changing of parameters so that we'll get a
+        # a consistent incrementing of the index (no failed power flow).
+        with patch.object(self.env.saw,
+                          'change_and_confirm_params_multiple_element'):
+            self.env.reset()
+            self.assertEqual(1, self.env.scenario_idx)
+            self.env.reset()
+            self.assertEqual(2, self.env.scenario_idx)
+            self.env.reset()
+            self.assertEqual(3, self.env.scenario_idx)
+
+    def test_action_count_reset(self):
+        """Ensure subsequent calls to reset reset the action_count."""
+        # Patch the changing of parameters so that we'll get a
+        # a consistent incrementing of the index (no failed power flow).
+        with patch.object(self.env.saw,
+                          'change_and_confirm_params_multiple_element'):
+            self.env.action_count = 10
+            self.env.reset()
+            self.assertEqual(0, self.env.action_count)
+            self.env.action_count = 17
+            self.env.reset()
+            self.assertEqual(0, self.env.action_count)
+            self.env.action_count = 1
+            self.env.reset()
+            self.assertEqual(0, self.env.action_count)
+
+    def test_load_state_called(self):
+        """Ensure the SAW object's LoadState method is called in reset.
+        """
+        # Patch the changing of parameters so that we'll get a
+        # a consistent incrementing of the index (no failed power flow).
+        with patch.object(self.env.saw,
+                          'change_and_confirm_params_multiple_element'):
+            with patch.object(self.env.saw, 'LoadState') as p:
+                self.env.reset()
+
+        p.assert_called_once()
+
+    def test_gens_and_loads_set_correctly(self):
+        """Ensure that the appropriate generators get opened and closed,
+        and that the power levels get set correctly in the case for both
+        generators and loads.
+        """
+        # There are 5 generators in the 14 bus case. In the base case,
+        # only gens at buses 1 and 2 are providing active power, but
+        # the others are "Closed" and thus regulating their voltage.
+        # We'll patch the environment's gen_mw to have all gens on
+        # and sharing the load evenly except the generator at bus 2.
+        p = LOAD_MW_14 / 4
+        gen_mw_row = np.array([p, 0, p, p, p])
+        gen_mw = self.env.gen_mw.copy()
+        gen_mw[0, :] = gen_mw_row
+
+        # Extract the original loading, but we'll bump one load by 1 MW
+        # and 1 MVAR and decrement another by 1 MW and 1 MVAR.
+        loads_mw_row = self.loads['LoadSMW'].to_numpy()
+        loads_mw_row[3] += 1
+        loads_mw_row[4] -= 1
+        loads_mw = self.env.loads_mw.copy()
+        loads_mw[0, :] = loads_mw_row
+
+        loads_mvar_row = self.loads['LoadSMVR'].to_numpy()
+        loads_mvar_row[3] += 1
+        loads_mvar_row[4] -= 1
+        loads_mvar = self.env.loads_mvar.copy()
+        loads_mvar[0, :] = loads_mvar_row
+
+        # Patch the scenario index, generator output, and loading. Then
+        # reset the environment.
+        with patch.object(self.env, 'gen_mw', new=gen_mw):
+            with patch.object(self.env, 'loads_mw', new=loads_mw):
+                with patch.object(self.env, 'loads_mvar', new=loads_mvar):
+                    self.env.reset()
+
+        # Pull the generator data from PowerWorld and ensure that both
+        # the status and output match up.
+        gen_data = self.env.saw.GetParametersMultipleElement(
+            ObjectType='gen',
+            ParamList=self.env.gen_key_fields + self.env.GEN_RESET_FIELDS)
+
+        # All gens except for the 2nd should be closed.
+        status = ['Closed'] * 5
+        status[1] = 'Open'
+        self.assertListEqual(status, gen_data['GenStatus'].tolist())
+
+        # Excluding the slack, generator MW output should exactly match
+        # what was commanded.
+        np.testing.assert_allclose(
+            gen_mw_row[1:], gen_data['GenMW'].to_numpy()[1:])
+
+        # The slack should be equal to within our assumed line losses.
+        np.testing.assert_allclose(
+            gen_mw_row[0], gen_data['GenMW'].to_numpy()[0],
+            rtol=LOSS, atol=0
+        )
+
+        # Pull the load data from PowerWorld and ensure that both the
+        # MW and MVAR outputs match up.
+        load_data = self.env.saw.GetParametersMultipleElement(
+            ObjectType='load',
+            ParamList=self.env.load_key_fields + self.env.LOAD_RESET_FIELDS
+        )
+
+        np.testing.assert_allclose(
+            loads_mw_row, load_data['LoadSMW'].to_numpy()
+        )
+
+        np.testing.assert_allclose(
+            loads_mvar_row, load_data['LoadSMVR'].to_numpy()
+        )
+
+    def test_failed_power_flow(self):
+        """Ensure that if the power flow fails to solve, we move on
+        to the next scenario.
+        """
+        # Patch SolvePowerFlow so the first call raises a
+        # PowerWorldError but the second simply returns None (indicating
+        # success).
+        with patch.object(
+                self.env.saw, 'SolvePowerFlow',
+                side_effect=[PowerWorldError, None]):
+            self.env.reset()
+
+        # Our first attempt should fail, and the second should succeed.
+        # The index is always bumped at the end of each iteration, so
+        # it should end up at 2 (starts at 0, bumped to 1 after first
+        # failed iteration, bumped to 2 after second successful
+        # iteration).
+        self.assertEqual(2, self.env.scenario_idx)
+
+    def test_low_voltage_skipped(self):
+        """Ensure that if a bus voltage comes back lower than allowed,
+        the case is skipped.
+        """
+        self.assertEqual(0, self.env.scenario_idx)
+
+        # We'll keep this simple and simply patch the bus_obs
+        # DataFrame.
+        bus_obs_1 = pd.DataFrame([[MIN_V, 'a'], [MIN_V - 0.01, 'b']],
+                                 columns=['BusPUVolt', 'stuff'])
+
+        bus_obs_2 = pd.DataFrame([[MIN_V, 'a'], [MIN_V, 'b']],
+                                 columns=['BusPUVolt', 'stuff'])
+
+        # Patch change_and_confirm... so that nothing gets changed in
+        # the case. Patch the bus_obs attribute, and patch
+        # _get_observation so that bus_obs does not get overridden.
+        with patch.object(self.env.saw,
+                          'change_and_confirm_params_multiple_element'):
+            with patch.object(self.env, 'bus_obs',
+                              side_effect=[bus_obs_1, bus_obs_2]):
+                with patch.object(self.env, '_get_observation'):
+                    self.env.reset()
+
+        # The scenario index should now be at 2.
+        self.assertEqual(2, self.env.scenario_idx)
 
 
 if __name__ == '__main__':
