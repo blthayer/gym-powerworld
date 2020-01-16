@@ -432,6 +432,7 @@ class VoltageControlEnv14BusTestCase(unittest.TestCase):
                 min_load_factor=self.min_load_factor,
                 rewards={'v_detla': 1000})
 
+
 # noinspection DuplicatedCode
 class VoltageControlEnv14BusResetTestCase(unittest.TestCase):
     """Test the reset method of the environment."""
@@ -675,6 +676,121 @@ class VoltageControlEnv14BusResetTestCase(unittest.TestCase):
                 with self.assertRaisesRegex(
                         UserWarning, 'We have gone through all scenarios'):
                     self.env.reset()
+
+
+# noinspection DuplicatedCode
+class VoltageControlEnv14BusStepTestCase(unittest.TestCase):
+    """Test the step method of the environment."""
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 1000
+        cls.max_load_factor = 2
+        cls.min_load_factor = 0.5
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.num_gen_voltage_bins = 9
+        cls.gen_voltage_range = (0.9, 1.1)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+
+        cls.env = voltage_control_env.VoltageControlEnv(
+            pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
+            max_load_factor=cls.max_load_factor,
+            min_load_factor=cls.min_load_factor,
+            min_load_pf=cls.min_load_pf,
+            lead_pf_probability=cls.lead_pf_probability,
+            load_on_probability=cls.load_on_probability,
+            num_gen_voltage_bins=cls.num_gen_voltage_bins,
+            gen_voltage_range=cls.gen_voltage_range,
+            seed=cls.seed,
+            log_level=logging.INFO,
+            dtype=cls.dtype
+        )
+
+        # For easy comparison with the original case, get a fresh SAW
+        # object. Do not make any changes to this, use only "get" type
+        # methods.
+        cls.saw = SAW(PWB_14, early_bind=True)
+
+        # Extract generator data needed for testing the reset method.
+        cls.gens = cls.saw.GetParametersMultipleElement(
+            ObjectType='gen',
+            ParamList=cls.env.gen_key_fields + cls.env.GEN_RESET_FIELDS)
+
+        # Extract generator data needed for testing the reset method.
+        cls.loads = cls.saw.GetParametersMultipleElement(
+            ObjectType='load',
+            ParamList=cls.env.load_key_fields + cls.env.LOAD_RESET_FIELDS
+        )
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.saw.exit()
+        cls.env.close()
+
+    def setUp(self) -> None:
+        """Reset the scenario index and call reset for each run.
+        """
+        self.env.scenario_idx = 0
+        self.env.reset()
+
+    def action_helper(self, action, gen_bus, v_set):
+        """Helper for testing that actions work correctly."""
+        # Perform the step.
+        self.env.step(action)
+
+        # Hard-code access to the 0th generator. It's at bus 1.
+        gen_data = self.env.saw.GetParametersSingleElement(
+            ObjectType='gen', ParamList=['BusNum', 'GenID', 'GenVoltSet'],
+            Values=[gen_bus, '1', 0]
+        )
+
+        self.assertAlmostEqual(v_set, gen_data['GenVoltSet'], places=3)
+
+    def test_action_0(self):
+        """Action 0 should set the 0th generator to the minimum."""
+        # The 0th generator is at bus 1.
+        self.action_helper(0, 1, self.gen_voltage_range[0])
+
+    def test_action_last(self):
+        """The last action should put the last generator to its maximum.
+        """
+        # The last generator is at bus 8.
+        self.action_helper(self.env.action_space.n - 1, 8,
+                           self.gen_voltage_range[1])
+
+    def test_action_middle(self):
+        """Test an action not on the book ends and ensure the generator
+        set point is updated correctly.
+        """
+        # Action 17 should put the 3rd generator at the 4th voltage
+        # level. The 3rd generator is at bus 3. Hard code the fact that
+        # the bins are in 0.025pu increments.
+        self.action_helper(17, 3, self.gen_voltage_range[0] + 3 * 0.025)
+
+    def test_action_count_increments(self):
+        """Ensure each subsequent call to step bumps the action_count.
+        """
+        self.assertEqual(0, self.env.action_count)
+        self.env.step(4)
+        self.assertEqual(1, self.env.action_count)
+        self.env.step(10)
+        self.assertEqual(2, self.env.action_count)
+        self.env.step(13)
+        self.assertEqual(3, self.env.action_count)
+
+    def test_failed_power_flow(self):
+        """If a PowerWorldError is raised while calling SolvePowerFlow,
+        the observation should come back as None, and the reward should
+        be negative.
+        """
 
 
 if __name__ == '__main__':
