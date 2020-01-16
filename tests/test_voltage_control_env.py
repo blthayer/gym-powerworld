@@ -677,6 +677,23 @@ class VoltageControlEnv14BusResetTestCase(unittest.TestCase):
                         UserWarning, 'We have gone through all scenarios'):
                     self.env.reset()
 
+    def test_reset_returns_proper_observation(self):
+        """Ensure a single call to reset calls _get_observation and
+        returns the observation.
+        """
+        with patch.object(self.env, '_get_observation',
+                          side_effect=self.env._get_observation) as p:
+            obs = self.env.reset()
+
+        # _get_observation should be called once only. Note if we get
+        # into a bad state where the voltages are two low, it may
+        # be called more than once. Bad test design due to the fact
+        # we can't just spin up new ESA instances for each test.
+        p.assert_called_once()
+
+        self.assertIsInstance(obs, np.ndarray)
+        self.assertEqual(obs.shape, self.env.observation_space.shape)
+
 
 # noinspection DuplicatedCode
 class VoltageControlEnv14BusStepTestCase(unittest.TestCase):
