@@ -27,6 +27,7 @@ N_LOADS_14 = 11
 LOAD_MW_14 = 259.0
 
 
+# noinspection DuplicatedCode
 class VoltageControlEnv14BusTestCase(unittest.TestCase):
     """Test initializing the environment with the 14 bus model."""
     @classmethod
@@ -393,6 +394,43 @@ class VoltageControlEnv14BusTestCase(unittest.TestCase):
         """After initialization, the action count should be 0."""
         self.assertEqual(0, self.env.action_count)
 
+    def test_reward_matches(self):
+        """For this simple initialization, the rewards should be the
+        same as the class constant.
+        """
+        self.assertDictEqual(self.env.rewards, self.env.REWARDS)
+
+    def test_override_reward(self):
+        """Ensure overriding a portion of the rewards behaves as
+        expected.
+        """
+        # Create a new env, but use new rewards.
+        env = voltage_control_env.VoltageControlEnv(
+            pwb_path=PWB_14, num_scenarios=10,
+            max_load_factor=self.max_load_factor,
+            min_load_factor=self.min_load_factor,
+            rewards={'v_delta': 1000})
+
+        # Loop and assert.
+        for key, value in env.rewards.items():
+            if key == 'v_delta':
+                self.assertNotEqual(env.REWARDS[key], value)
+            else:
+                self.assertEqual(env.REWARDS[key], value)
+
+        # Ensure the keys are the same.
+        self.assertListEqual(list(env.rewards.keys()),
+                             list(env.REWARDS.keys()))
+
+    def test_bad_reward_key(self):
+        """Ensure an exception is raised if a bad reward key is given.
+        """
+        with self.assertRaisesRegex(KeyError, 'The given rewards key, v_detl'):
+            env = voltage_control_env.VoltageControlEnv(
+                pwb_path=PWB_14, num_scenarios=10,
+                max_load_factor=self.max_load_factor,
+                min_load_factor=self.min_load_factor,
+                rewards={'v_detla': 1000})
 
 # noinspection DuplicatedCode
 class VoltageControlEnv14BusResetTestCase(unittest.TestCase):

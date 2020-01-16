@@ -5,6 +5,7 @@ import pandas as pd
 import logging
 from esa import SAW, PowerWorldError
 from typing import Union, Tuple
+from copy import deepcopy
 
 # When generating scenarios, we're drawing random generation to meet
 # the load. There will be some rounding error, so set a reasonable
@@ -71,6 +72,34 @@ class VoltageControlEnv(gym.Env):
     # want the per unit voltage at the bus.
     BUS_OBS_FIELDS = ['BusPUVolt']
 
+    # Specify default rewards.
+    # NOTE: When computing rewards, all reward components will be
+    #   treated with a positive sign. Thus, specify penalties in this
+    #   dictionary with a negative sign.
+    REWARDS = {
+        # Negative reward (penalty) given for taking an action.
+        # TODO: May want different penalties for different types of
+        #   actions, e.g. changing gen set point vs. switching cap.
+        "action": -10,
+        # Reward per 0.01 pu voltage movement in the right direction
+        # (i.e. a voltage below the lower bound moving upward).
+        "v_delta": 1,
+        # Bonus reward for moving a voltage that was not in-bounds
+        # in-bounds. This is set to be equal to the action penalty so
+        # that moving a single bus in-bounds makes an action worth it.
+        "v_in_bounds": 10,
+        # Penalty for moving a voltage that was in-bounds out-of-bounds.
+        "v_out_bounds": -10,
+        # Reward per 1% increase in generator var reserves (or penalty
+        # per 1% decrease).
+        # TODO: Really, this should be on a per Mvar basis. By basing
+        #   this on the generator's maximum, we lose information about
+        #   generator sizing. This percentage change scheme will equally
+        #   reward large and small generators, but those large and small
+        #   generators have different sized roles in voltage support.
+        "gen_var_delta": 1
+    }
+
     def __init__(self, pwb_path: str, num_scenarios: int,
                  max_load_factor: float = None,
                  min_load_factor: float = None,
@@ -81,6 +110,7 @@ class VoltageControlEnv(gym.Env):
                  gen_voltage_range: Tuple[float, float] = (0.9, 1.1),
                  seed: float = None,
                  log_level=logging.INFO,
+                 rewards: Union[dict, None] = None,
                  dtype=np.float32):
         """
 
@@ -126,6 +156,11 @@ class VoltageControlEnv(gym.Env):
         :param log_level: Log level for the environment's logger. Pass
             a constant from the logging module, e.g. logging.DEBUG or
             logging.INFO.
+        :param rewards: Dictionary of rewards/penalties. For available
+            fields and their descriptions, see the class constant
+            REWARDS. This dictionary can be partial, i.e. include only
+            a subset of fields contained in REWARDS. To use the default
+            rewards, pass in None.
         :param dtype: Numpy datatype to be used for most numbers. It's
             common to use np.float32 for machine learning tasks to
             reduce memory consumption.
@@ -360,6 +395,27 @@ class VoltageControlEnv(gym.Env):
         # We'll track how many actions the agent has taken in an episode
         # as part of the stopping criteria.
         self.action_count = 0
+
+        ################################################################
+        # Set rewards.
+        ################################################################
+        if rewards is None:
+            # If not given rewards, use the default.
+            self.rewards = self.REWARDS
+        else:
+            # Start by simply copying REWARDS.
+            self.rewards = deepcopy(self.REWARDS)
+
+            # If given rewards, loop over the dictionary and set fields.
+            for key, value in rewards.items():
+                # Raise exception if key is invalid.
+                if key not in self.REWARDS:
+                    raise KeyError(
+                        f'The given rewards key, {key}, is invalid. Please '
+                        'only use keys in the class constant, REWARDS.')
+
+                # If we're here, the key is valid. Set it.
+                self.rewards[key] = value
 
         ################################################################
         # Solve power flow, save state.
