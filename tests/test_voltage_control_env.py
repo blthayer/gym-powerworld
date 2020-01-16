@@ -492,7 +492,9 @@ class VoltageControlEnv14BusResetTestCase(unittest.TestCase):
         # a consistent incrementing of the index (no failed power flow).
         with patch.object(self.env.saw,
                           'change_and_confirm_params_multiple_element'):
-            with patch.object(self.env.saw, 'LoadState') as p:
+            with patch.object(
+                    self.env.saw, 'LoadState',
+                    side_effect=self.env.saw.LoadState) as p:
                 self.env.reset()
 
         p.assert_called_once()
@@ -579,7 +581,7 @@ class VoltageControlEnv14BusResetTestCase(unittest.TestCase):
         # success).
         with patch.object(
                 self.env.saw, 'SolvePowerFlow',
-                side_effect=[PowerWorldError, None]):
+                side_effect=[PowerWorldError('failure'), None]):
             self.env.reset()
 
         # Our first attempt should fail, and the second should succeed.
@@ -595,26 +597,40 @@ class VoltageControlEnv14BusResetTestCase(unittest.TestCase):
         """
         self.assertEqual(0, self.env.scenario_idx)
 
-        # We'll keep this simple and simply patch the bus_obs
-        # DataFrame.
-        bus_obs_1 = pd.DataFrame([[MIN_V, 'a'], [MIN_V - 0.01, 'b']],
-                                 columns=['BusPUVolt', 'stuff'])
+        # Having trouble getting some good patching going in order to
+        # get _get_observation to set the bus_obs differently for each
+        # run. So, I'm going to do this the "bad" way and set up the
+        # first scenario such that all generators are off (the power
+        # flow will solve, but all buses have 0 pu voltage),
+        # and set up the second scenario to ensure the power flow will
+        # converge with all buses above the minimum threshold.
+        gen_mw = np.array([[0] * N_GENS_14,
+                           self.gens['GenMW'].tolist()])
 
-        bus_obs_2 = pd.DataFrame([[MIN_V, 'a'], [MIN_V, 'b']],
-                                 columns=['BusPUVolt', 'stuff'])
+        load_mw = np.array([[100] * N_LOADS_14,
+                            self.loads['LoadSMW'].tolist()])
 
-        # Patch change_and_confirm... so that nothing gets changed in
-        # the case. Patch the bus_obs attribute, and patch
-        # _get_observation so that bus_obs does not get overridden.
-        with patch.object(self.env.saw,
-                          'change_and_confirm_params_multiple_element'):
-            with patch.object(self.env, 'bus_obs',
-                              side_effect=[bus_obs_1, bus_obs_2]):
-                with patch.object(self.env, '_get_observation'):
+        load_mvar = np.array([[0] * N_LOADS_14,
+                             self.loads['LoadSMVR'].tolist()])
+
+        # Patch the environment's generator and load scenario data.
+        with patch.object(self.env, 'gen_mw', new=gen_mw):
+            with patch.object(self.env, 'loads_mw', new=load_mw):
+                with patch.object(self.env, 'loads_mvar', new=load_mvar):
                     self.env.reset()
 
         # The scenario index should now be at 2.
         self.assertEqual(2, self.env.scenario_idx)
+
+    def test_hit_max_iterations(self):
+        """Exception should be raised once all scenarios are exhausted.
+        """
+        with patch.object(self.env.saw, 'SolvePowerFlow',
+                          side_effect=PowerWorldError('failure')):
+            with patch.object(self.env, 'num_scenarios', new=5):
+                with self.assertRaisesRegex(
+                        UserWarning, 'We have gone through all scenarios'):
+                    self.env.reset()
 
 
 if __name__ == '__main__':

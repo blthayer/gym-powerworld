@@ -595,12 +595,6 @@ class VoltageControlEnv(gym.Env):
         # Reset the action counter.
         self.action_count = 0
 
-        # Extract a subset of the generator and load data.
-        gens = self.gen_data.loc[:, self.gen_key_fields
-                                 + self.GEN_RESET_FIELDS]
-        loads = self.load_data.loc[:, self.load_key_fields
-                                   + self.LOAD_RESET_FIELDS]
-
         # Flag for if the the case is "good".
         good = False
 
@@ -615,28 +609,18 @@ class VoltageControlEnv(gym.Env):
             #   converge.
             self.saw.LoadState()
 
-            # Turn generators on/off and set their MW set points.
-            gens.loc[:, 'GenMW'] = self.gen_mw[self.scenario_idx, :]
-            gen_g_0 = self.gen_mw[self.scenario_idx, :] > 0
-            gens.loc[gen_g_0, 'GenStatus'] = 'Closed'
-            gens.loc[~gen_g_0, 'GenStatus'] = 'Open'
-            # TODO: may want to use a faster command like
-            #   ChangeParametersMultipleElement. NOTE: Will need to
-            #   update patching in tests if this route is taken.
-            self.saw.change_and_confirm_params_multiple_element('gen', gens)
-
-            # Set load P/Q.
-            loads.loc[:, 'LoadSMW'] = self.loads_mw[self.scenario_idx, :]
-            loads.loc[:, 'LoadSMVR'] = self.loads_mvar[self.scenario_idx, :]
-            self.saw.change_and_confirm_params_multiple_element('load', loads)
+            # Get generators and loads set up for this scenario.
+            self._set_gens_for_scenario()
+            self._set_loads_for_scenario()
 
             # Solve the power flow.
             try:
                 self.saw.SolvePowerFlow()
-            except PowerWorldError:
+            except PowerWorldError as exc:
                 # This scenario is bad. Move on.
                 self.log.debug(
-                    f'Scenario {self.scenario_idx} failed.')
+                    f'Scenario {self.scenario_idx} failed. From SimAuto:\n'
+                    f'{exc.args[0]}')
             else:
                 # Success! The power flow solved. Let's get an
                 # observation, which will set some useful DataFrames
@@ -717,6 +701,40 @@ class VoltageControlEnv(gym.Env):
     def close(self):
         """Tear down SimAuto wrapper."""
         self.saw.exit()
+
+    def _set_gens_for_scenario(self):
+        """Helper to set up generators in the case for this
+        episode/scenario. This method should only be called by reset.
+        """
+        # Extract a subset of the generator data.
+        gens = self.gen_data.loc[:, self.gen_key_fields
+                                 + self.GEN_RESET_FIELDS]
+
+        # Turn generators on/off and set their MW set points.
+        gens.loc[:, 'GenMW'] = self.gen_mw[self.scenario_idx, :]
+        gen_g_0 = self.gen_mw[self.scenario_idx, :] > 0
+        gens.loc[gen_g_0, 'GenStatus'] = 'Closed'
+        gens.loc[~gen_g_0, 'GenStatus'] = 'Open'
+        # TODO: may want to use a faster command like
+        #   ChangeParametersMultipleElement. NOTE: Will need to
+        #   update patching in tests if this route is taken.
+        self.saw.change_and_confirm_params_multiple_element('gen', gens)
+
+    def _set_loads_for_scenario(self):
+        """Helper to set up loads in the case for this episode/scenario.
+        This method should only be called by reset.
+        """
+        # Extract a subset of the load data.
+        loads = self.load_data.loc[:, self.load_key_fields
+                                   + self.LOAD_RESET_FIELDS]
+
+        # Set P and Q.
+        loads.loc[:, 'LoadSMW'] = self.loads_mw[self.scenario_idx, :]
+        loads.loc[:, 'LoadSMVR'] = self.loads_mvar[self.scenario_idx, :]
+        # TODO: may want to use a faster command like
+        #   ChangeParametersMultipleElement. NOTE: Will need to
+        #   update patching in tests if this route is taken.
+        self.saw.change_and_confirm_params_multiple_element('load', loads)
 
     def _get_observation(self) -> np.ndarray:
         """Helper to return an observation. For the given simulation,
