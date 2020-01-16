@@ -523,6 +523,12 @@ class VoltageControlEnv14BusResetTestCase(unittest.TestCase):
             self.env.reset()
             self.assertEqual(0, self.env.action_count)
 
+    def test_all_v_in_range_reset(self):
+        """Ensure the all_v_in_range attribute gets reset."""
+        self.env.all_v_in_range = True
+        self.env.reset()
+        self.assertFalse(self.env.all_v_in_range)
+
     def test_load_state_called(self):
         """Ensure the SAW object's LoadState method is called in reset.
         """

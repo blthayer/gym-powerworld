@@ -392,6 +392,11 @@ class VoltageControlEnv(gym.Env):
         self.load_obs_prev: Union[pd.DataFrame, None] = None
         self.bus_obs_prev: Union[pd.DataFrame, None] = None
 
+        # Initialize attribute for checking if all voltages are in
+        # range. This will be used to check if an episode is done, and
+        # will be reset in the "reset" method.
+        self.all_v_in_range = False
+
         # We'll track how many actions the agent has taken in an episode
         # as part of the stopping criteria.
         self.action_count = 0
@@ -650,6 +655,9 @@ class VoltageControlEnv(gym.Env):
         """
         # Reset the action counter.
         self.action_count = 0
+
+        # Reset all_v_in_range.
+        self.all_v_in_range = False
 
         # Flag for if the the case is "good".
         good = False
