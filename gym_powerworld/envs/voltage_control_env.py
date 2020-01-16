@@ -102,7 +102,10 @@ class VoltageControlEnv(gym.Env):
         #   generator sizing. This percentage change scheme will equally
         #   reward large and small generators, but those large and small
         #   generators have different sized roles in voltage support.
-        "gen_var_delta": 1
+        "gen_var_delta": 1,
+        # Penalty for taking an action which causes the power flow to
+        # fail to converge (or voltages get below the MIN_V threshold).
+        "fail": -1000
     }
 
     def __init__(self, pwb_path: str, num_scenarios: int,
@@ -875,11 +878,14 @@ class VoltageControlEnv(gym.Env):
         # to avoid changing set points if possible.
         reward = self.rewards['action']
 
-        # Give a positive reward for moving bus voltages that were
-        # outside the boundary the right direction.
+        # Get masks for bus voltages which are too high or too low for
+        # both the previous (pre-action) data frame and the current
+        # (post-action) data frame.
         # TODO: we should probably only consider load buses.
-        low_v = self.bus_obs_prev['BusPUVolt'] < LOW_V
-        high_v = self.bus_obs_prev['BusPUVolt'] > HIGH_V
+        low_v_prev = self.bus_obs_prev['BusPUVolt'] < LOW_V
+        high_v_prev = self.bus_obs_prev['BusPUVolt'] > HIGH_V
+        low_v_now = self.bus_obs['BusPUVolt'] < LOW_V
+        high_v_now = self.bus_obs['BusPUVolt'] > HIGH_V
 
         # Take the difference, and divide by 0.01 so that the rewards/
         # penalties will be per 0.01 pu change.
@@ -887,18 +893,18 @@ class VoltageControlEnv(gym.Env):
             (self.bus_obs['BusPUVolt'] - self.bus_obs_prev['BusPUVolt']) / 0.01
 
         # Low voltages that moved up:
-        low_up = low_v & (v_delta_01 > 0)
+        low_up = low_v_prev & (v_delta_01 > 0)
         reward += v_delta_01[low_up].sum() * self.rewards['v_delta']
 
         # High voltages that moved down:
-        high_down = high_v & (v_delta_01 < 0)
+        high_down = high_v_prev & (v_delta_01 < 0)
         reward += v_delta_01[high_down].sum() * self.rewards['v_delta']
 
         # TODO: penalize voltages that move outside of the band.
 
         # Check if all voltages are in range.
         # TODO: this is using "bus_obs_prev" which is WRONG.
-        if (low_v & high_v).sum() == 0:
+        if (low_v_prev & high_v_prev).sum() == 0:
             self.all_v_in_range = True
         else:
             self.all_v_in_range = False
