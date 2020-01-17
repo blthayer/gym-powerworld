@@ -524,12 +524,6 @@ class VoltageControlEnv14BusResetTestCase(unittest.TestCase):
             self.env.reset()
             self.assertEqual(0, self.env.action_count)
 
-    def test_all_v_in_range_reset(self):
-        """Ensure the all_v_in_range attribute gets reset."""
-        self.env.all_v_in_range = True
-        self.env.reset()
-        self.assertFalse(self.env.all_v_in_range)
-
     def test_load_state_called(self):
         """Ensure the SAW object's LoadState method is called in reset.
         """
@@ -791,6 +785,14 @@ class VoltageControlEnv14BusStepTestCase(unittest.TestCase):
         the observation should come back as None, and the reward should
         be negative.
         """
+        with patch.object(self.env.saw, 'SolvePowerFlow',
+                          side_effect=PowerWorldError('failure')):
+            obs, reward, done, info = self.env.step(12)
+
+        self.assertIsNone(obs)
+        self.assertTrue(done)
+        self.assertEqual(
+            reward, self.env.rewards['action'] + self.env.rewards['fail'])
 
 
 # noinspection DuplicatedCode

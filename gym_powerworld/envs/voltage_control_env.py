@@ -393,7 +393,7 @@ class VoltageControlEnv(gym.Env):
             low=0, high=1, shape=(self.num_obs,), dtype=self.dtype)
 
         # Initialize attributes for holding our most recent observation
-        # data. These will be set in _get_observation.
+        # data. These will be set in _rotate_and_get_observation_frames.
         self.gen_obs: Union[pd.DataFrame, None] = None
         self.load_obs: Union[pd.DataFrame, None] = None
         self.bus_obs: Union[pd.DataFrame, None] = None
@@ -668,18 +668,11 @@ class VoltageControlEnv(gym.Env):
         # Reset all_v_in_range.
         self.all_v_in_range = False
 
-        # Flag for if the the case is "good".
-        good = False
+        done = False
 
-        while (not good) and (self.scenario_idx < self.num_scenarios):
-            # Load the initial state of the system.
-            # TODO: This is going to slow things down - is it necessary?
-            #   NOTE: It seems to be necessary, as we can get PowerWorld
-            #   stuck in low voltage solutions.
-            #   NOTE: The alternative may be to use an AUX file to set
-            #   the option to initialize to flat start. However, using
-            #   the flat start can reduce the number of cases that
-            #   converge.
+        while (not done) & (self.scenario_idx < self.num_scenarios):
+            # Load the initial state of the system to avoid getting
+            # stuck in a low voltage solution from a previous solve.
             self.saw.LoadState()
 
             # Get generators and loads set up for this scenario.
@@ -688,38 +681,19 @@ class VoltageControlEnv(gym.Env):
 
             # Solve the power flow.
             try:
-                self.saw.SolvePowerFlow()
-            except PowerWorldError as exc:
+                obs = self._solve_and_observe()
+            except (PowerWorldError, LowVoltageError) as exc:
                 # This scenario is bad. Move on.
                 self.log.debug(
-                    f'Scenario {self.scenario_idx} failed. From SimAuto:\n'
+                    f'Scenario {self.scenario_idx} failed. Error message: '
                     f'{exc.args[0]}')
             else:
-                # Success! The power flow solved. Let's get an
-                # observation, which will set some useful DataFrames
-                # for screening the case.
-                obs = self._get_observation()
-
-                # If any bus falls below 0.75 per unit voltage, let's
-                # discard this case and move on. Note that for constant
-                # power loads, PowerWorld will start changing load
-                # levels for any buses that fall below 0.7 pu. So, 0.75
-                # should give us a safety margin to avoid PowerWorld
-                # tweaking load levels.
-                # TODO: Stop hard-coding arbitrary limit.
-                # TODO: We could get more sophisticated here and look
-                #   at reactive power capability of generators vs.
-                #   load reactive power requirements. However, this
-                #   should probably be addressed in scenario creation.
-                if (self.bus_obs['BusPUVolt'] < MIN_V).any():
-                    # Move on to the next loop iteration.
-                    good = False
-                else:
-                    # Case is good!
-                    good = True
-
-            # Increment the scenario index.
-            self.scenario_idx += 1
+                # Success! The power flow solved, and no voltages went
+                # below the minimum. Signify we're done looping.
+                done = True
+            finally:
+                # Always increment the scenario index.
+                self.scenario_idx += 1
 
         # Raise exception if we've gone through all the scenarios.
         # TODO: better exception.
@@ -747,27 +721,24 @@ class VoltageControlEnv(gym.Env):
             + [voltage]
         )
 
-        # Solve the power flow.
+        # Solve the power flow and get an observation.
         try:
-            self.saw.SolvePowerFlow()
-        except PowerWorldError:
-            # The power flow failed to solve. This episode is complete,
-            # and we need a large negative reward.
+            obs = self._solve_and_observe()
+        except (PowerWorldError, LowVoltageError):
+            # The power flow failed to solve or bus voltages went below
+            # the minimum. This episode is complete.
             # TODO: Should our observation be None?
-            # TODO: Need to tune reward - it should be bigger than a bad
-            #  voltage penalty, as crashing the power flow is worse.
             obs = None
             done = True
-            reward = -100
+            # An action was taken, so include both the action and
+            # failure penalties.
+            reward = self.rewards['fail'] + self.rewards['action']
         else:
-            # The power flow successfully solved.
-            obs = self._get_observation()
-            done = self._check_done()
+            # The power flow successfully solved. Compute the reward
+            # and check to see if this episode is done.
             reward = self._compute_reward()
+            done = self._check_done()
 
-        # TODO: need criteria for determining when an episode is done.
-        #   it's probably too simple to just say "voltages are in range,
-        #   all done."
         # TODO: update the fourth return (info) to, you know, actually
         #   give info.
         # That's it.
@@ -776,6 +747,38 @@ class VoltageControlEnv(gym.Env):
     def close(self):
         """Tear down SimAuto wrapper."""
         self.saw.exit()
+
+    def _solve_and_observe(self):
+        """Helper to solve the power flow and get an observation.
+
+        :raises LowVoltageError: If any bus voltage is below MIN_V after
+            solving the power flow.
+        :raises PowerWorldError: If PowerWorld fails to solve the power
+            flow.
+        """
+        # Start by solving the power flow. This will raise a
+        # PowerWorldError if it fails to solve.
+        self.saw.SolvePowerFlow()
+
+        # Get new observations, rotate old ones.
+        self._rotate_and_get_observation_frames()
+
+        # Check if all voltages are in range.
+        self.all_v_in_range = (
+                ((self.bus_obs['BusPUVolt'] < LOW_V)
+                 & (self.bus_obs['BusPUVolt'] > HIGH_V)).sum()
+                == 0
+        )
+
+        # If any voltages are too low, raise exception.
+        if (self.bus_obs['BusPUVolt'] < MIN_V).any():
+            num_low = (self.bus_obs['BusPUVolt'] < MIN_V).sum()
+            raise LowVoltageError(
+                f'{num_low} buses were below {MIN_V:.2f} p.u.'
+            )
+
+        # Get and return a properly arranged observation.
+        return self._get_observation()
 
     def _set_gens_for_scenario(self):
         """Helper to set up generators in the case for this
@@ -813,13 +816,8 @@ class VoltageControlEnv(gym.Env):
 
     def _get_observation(self) -> np.ndarray:
         """Helper to return an observation. For the given simulation,
-        the power flow should already have been solved. This method
-        will overwrite the attributes self.gen_obs, self.load_obs,
-        and self.bus_obs
+        the power flow should already have been solved.
         """
-        # Get new observations, rotate old ones.
-        self._rotate_and_get_observation_frames()
-
         # Add a column to load_data for power factor lead/lag
         self.load_obs['lead'] = \
             (self.load_obs['LoadSMVR'] < 0).astype(self.dtype)
@@ -870,8 +868,8 @@ class VoltageControlEnv(gym.Env):
 
     def _compute_reward(self):
         """Helper to compute a reward after an action. This method
-        should only be called after _get_observation, as
-        _get_observation updates the observation DataFrame attributes.
+        should only be called after _rotate_and_get_observation_frames,
+        as that method updates the observation DataFrame attributes.
         """
         # First of all, any action gets us a negative reward. We'd like
         # to avoid changing set points if possible.
@@ -946,7 +944,8 @@ class VoltageControlEnv(gym.Env):
         return reward
 
     def _check_done(self):
-        """Check whether (True) or not (False) and episode is done.
+        """Check whether (True) or not (False) and episode is done. Call
+        this after calling _solve_and_observe.
         """
         # If the number of actions taken in this episode has exceeded
         # a threshold, we're done.
@@ -961,3 +960,12 @@ class VoltageControlEnv(gym.Env):
         # Otherwise, we're not done.
         return False
 
+
+class Error(Exception):
+    """Base class for exceptions in this module."""
+    pass
+
+
+class LowVoltageError(Error):
+    """Raised if any bus voltages go below MIN_V."""
+    pass
