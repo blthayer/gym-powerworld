@@ -37,6 +37,7 @@ MIN_V = 0.75
 # TODO: May want to consider 0.9 to 1.1.
 LOW_V = 0.95
 HIGH_V = 1.05
+NOMINAL_V = 1.0
 
 
 class VoltageControlEnv(gym.Env):
@@ -872,50 +873,74 @@ class VoltageControlEnv(gym.Env):
         should only be called after _get_observation, as
         _get_observation updates the observation DataFrame attributes.
         """
-        # TODO: Reward tuning. Lots of arbitrary placeholders here.
-
         # First of all, any action gets us a negative reward. We'd like
         # to avoid changing set points if possible.
         reward = self.rewards['action']
 
+        # Compute the difference in the distance to nominal voltage for
+        # all buses before and after the action. Multiply by 100 so that
+        # we reward change per 0.01 pu. A positive value indicates
+        # reducing the distance to nominal, while a negative value
+        # indicates increasing the distance to nominal.
+        nom_delta_diff = \
+            ((self.bus_obs_prev['BusPUVolt'] - NOMINAL_V).abs()
+             - (self.bus_obs['BusPUVolt'] - NOMINAL_V).abs()) * 100
+
         # Get masks for bus voltages which are too high or too low for
         # both the previous (pre-action) data frame and the current
         # (post-action) data frame.
-        # TODO: we should probably only consider load buses.
         low_v_prev = self.bus_obs_prev['BusPUVolt'] < LOW_V
         high_v_prev = self.bus_obs_prev['BusPUVolt'] > HIGH_V
         low_v_now = self.bus_obs['BusPUVolt'] < LOW_V
         high_v_now = self.bus_obs['BusPUVolt'] > HIGH_V
 
-        # Take the difference, and divide by 0.01 so that the rewards/
-        # penalties will be per 0.01 pu change.
-        v_delta_01 = \
-            (self.bus_obs['BusPUVolt'] - self.bus_obs_prev['BusPUVolt']) / 0.01
+        # Get masks for voltages.
+        in_prev = ~low_v_prev & ~high_v_prev  # in bounds before
+        out_prev = low_v_prev | high_v_prev   # out of bounds before
+        in_now = ~low_v_now & ~high_v_now     # in bounds now
+        out_now = low_v_now | high_v_now      # out of bounds now
 
-        # Low voltages that moved up:
-        low_up = low_v_prev & (v_delta_01 > 0)
-        reward += v_delta_01[low_up].sum() * self.rewards['v_delta']
+        # Now, get more "composite" masks
+        in_out = in_prev & out_now          # in before, out now
+        out_in = out_prev & in_now          # out before, in now
+        in_out_low = in_prev & low_v_now    # in before, low now
+        in_out_high = in_prev & high_v_now  # in before, high now
+        # Out of bounds before, but moved in the right direction.
+        out_right_d = out_prev & nom_delta_diff[out_prev] > 0
 
-        # High voltages that moved down:
-        high_down = high_v_prev & (v_delta_01 < 0)
-        reward += v_delta_01[high_down].sum() * self.rewards['v_delta']
+        # Give reward for voltages that were out of bounds, but moved in
+        # the right direction, based on the change in distance from
+        # nominal voltage.
+        reward += (nom_delta_diff[out_right_d] * self.rewards['v_delta']).sum()
 
-        # TODO: penalize voltages that move outside of the band.
+        # Give penalty for voltages that were in bounds, but moved out
+        # of bounds. Penalty should be based on how far away from the
+        # boundary (upper or lower) that they moved.
+        reward += ((self.bus_obs['BusPUVolt'][in_out_low] - LOW_V) / 0.01
+                   * self.rewards['v_delta']).sum()
+        reward += ((HIGH_V - self.bus_obs['BusPUVolt'][in_out_high]) / 0.01
+                   * self.rewards['v_delta']).sum()
+
+        # Give an extra penalty for moving buses out of bounds.
+        reward += in_out.sum() * self.rewards['v_out_bounds']
+
+        # Give an extra reward for moving buses in bounds.
+        reward += out_in.sum() * self.rewards['v_in_bounds']
 
         # Check if all voltages are in range.
-        # TODO: this is using "bus_obs_prev" which is WRONG.
-        if (low_v_prev & high_v_prev).sum() == 0:
+        if (low_v_now & high_v_now).sum() == 0:
             self.all_v_in_range = True
         else:
             self.all_v_in_range = False
 
         # Give a positive reward for lessening generator var loading,
         # and a negative reward for increasing it.
+        # TODO: This really should account for actual vars not just
+        #   percent loading.
         var_delta = (self.gen_obs_prev['GenMVRPercent']
                      - self.gen_obs['GenMVRPercent'])
 
-        # TODO: reward tuning.
-        reward += (var_delta * 10).sum()
+        reward += (var_delta * self.rewards['gen_var_delta']).sum()
 
         # All done.
         return reward

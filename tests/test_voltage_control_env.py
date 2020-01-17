@@ -730,26 +730,9 @@ class VoltageControlEnv14BusStepTestCase(unittest.TestCase):
             dtype=cls.dtype
         )
 
-        # For easy comparison with the original case, get a fresh SAW
-        # object. Do not make any changes to this, use only "get" type
-        # methods.
-        cls.saw = SAW(PWB_14, early_bind=True)
-
-        # Extract generator data needed for testing the reset method.
-        cls.gens = cls.saw.GetParametersMultipleElement(
-            ObjectType='gen',
-            ParamList=cls.env.gen_key_fields + cls.env.GEN_RESET_FIELDS)
-
-        # Extract generator data needed for testing the reset method.
-        cls.loads = cls.saw.GetParametersMultipleElement(
-            ObjectType='load',
-            ParamList=cls.env.load_key_fields + cls.env.LOAD_RESET_FIELDS
-        )
-
     # noinspection PyUnresolvedReferences
     @classmethod
     def tearDownClass(cls) -> None:
-        cls.saw.exit()
         cls.env.close()
 
     def setUp(self) -> None:
@@ -808,6 +791,238 @@ class VoltageControlEnv14BusStepTestCase(unittest.TestCase):
         the observation should come back as None, and the reward should
         be negative.
         """
+
+
+# noinspection DuplicatedCode
+class VoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
+    """Test the _compute_reward method of the environment."""
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 1000
+        cls.max_load_factor = 2
+        cls.min_load_factor = 0.5
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.num_gen_voltage_bins = 9
+        cls.gen_voltage_range = (0.9, 1.1)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+
+        cls.rewards = {
+            "action": -10,
+            "v_delta": 1,
+            "v_in_bounds": 10,
+            "v_out_bounds": -10,
+            "gen_var_delta": 1,
+            "fail": -1000
+        }
+
+        cls.env = voltage_control_env.VoltageControlEnv(
+            pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
+            max_load_factor=cls.max_load_factor,
+            min_load_factor=cls.min_load_factor,
+            min_load_pf=cls.min_load_pf,
+            lead_pf_probability=cls.lead_pf_probability,
+            load_on_probability=cls.load_on_probability,
+            num_gen_voltage_bins=cls.num_gen_voltage_bins,
+            gen_voltage_range=cls.gen_voltage_range,
+            seed=cls.seed,
+            log_level=logging.INFO,
+            rewards=cls.rewards,
+            dtype=cls.dtype
+        )
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.close()
+
+    def setUp(self) -> None:
+        """Override the relevant observation DataFrames.
+        """
+        # 6 buses with unity per unit voltage.
+        v_df = pd.DataFrame(
+            [[1., 'a'], [1., 'b'], [1., 'c'], [1., 'd'], [1., 'e'], [1., 'f']],
+            columns=['BusPUVolt', 'junk'])
+
+        self.env.bus_obs_prev = v_df.copy()
+        self.env.bus_obs = v_df.copy()
+
+        # 6 gens at 80% var loading.
+        var_df = pd.DataFrame(
+            [[.8, 'a'], [.8, 'b'], [.8, 'c'], [.8, 'd'], [.8, 'e'], [.8, 'f']],
+            columns=['GenMVRPercent', 'junk'])
+
+        self.env.gen_obs_prev = var_df.copy()
+        self.env.gen_obs = var_df.copy()
+
+    def get_reward_no_action(self):
+        """Helper to compute the reward but temporarily zero out the
+        action penalty.
+        """
+        with patch.dict(self.env.rewards, {'action': 0}):
+            reward = self.env._compute_reward()
+
+        return reward
+
+    def test_action_only(self):
+        """No values change, should only get the action penalty."""
+        self.assertEqual(self.env._compute_reward(), self.rewards['action'])
+
+    def test_low_voltage_moved_up(self):
+        """Test a single low bus voltage moving up, but not in bounds.
+        """
+        self.env.bus_obs_prev.loc[2, 'BusPUVolt'] = 0.8
+        self.env.bus_obs.loc[2, 'BusPUVolt'] = 0.85
+
+        # The bus voltage moved up 5 1/100ths per unit.
+        self.assertAlmostEqual(self.get_reward_no_action(),
+                               5 * self.rewards['v_delta'])
+
+    def test_high_voltage_moved_down(self):
+        """Test a single high bus voltage moving down, but not in bounds.
+        """
+        self.env.bus_obs_prev.loc[0, 'BusPUVolt'] = 1.1
+        self.env.bus_obs.loc[0, 'BusPUVolt'] = 1.07
+
+        # The bus voltage moved down 3 1/100ths per unit.
+        self.assertAlmostEqual(self.get_reward_no_action(),
+                               3 * self.rewards['v_delta'])
+
+    def test_low_voltage_moved_up_past_nominal(self):
+        """Test a single low bus voltage moving up and exceeding nominal
+        voltage.
+        """
+        self.env.bus_obs_prev.loc[2, 'BusPUVolt'] = 0.93
+        self.env.bus_obs.loc[2, 'BusPUVolt'] = 1.02
+
+        # The bus voltage should get credit for reducing its distance to
+        # nominal, as well as a bonus for moving into the good band.
+        self.assertAlmostEqual(
+            self.get_reward_no_action(),
+            # ((1.02 - 1) - (1 - 0.93)) * 100 = 5
+            5 * self.rewards['v_delta'] + self.rewards['v_in_bounds'])
+
+    def test_high_voltage_moved_down_past_nominal(self):
+        """Test a single high bus voltage moving down and going below
+        nominal voltage.
+        """
+        self.env.bus_obs_prev.loc[5, 'BusPUVolt'] = 1.1
+        self.env.bus_obs.loc[5, 'BusPUVolt'] = 0.98
+
+        # The bus voltage should get credit for moving to nominal, and
+        # also get a bonus for moving into the good band.
+        self.assertAlmostEqual(
+            self.get_reward_no_action(),
+            # ((1.1 - 1) - (1 - 0.98)) * 100 = 8
+            8 * self.rewards['v_delta'] + self.rewards['v_in_bounds'])
+
+    def test_low_voltage_moved_in_range(self):
+        """Should also get a bonus for moving a voltage in bounds."""
+        self.env.bus_obs_prev.loc[1, 'BusPUVolt'] = 0.91
+        self.env.bus_obs.loc[1, 'BusPUVolt'] = 0.95
+
+        # The bus voltage moved up 4 1/100ths per unit, and also moved
+        # into the "good" range.
+        self.assertAlmostEqual(
+            self.get_reward_no_action(),
+            4 * self.rewards['v_delta'] + self.rewards['v_in_bounds'])
+
+    def test_high_voltage_moved_in_range(self):
+        """Should also get a bonus for moving a voltage in bounds."""
+        self.env.bus_obs_prev.loc[3, 'BusPUVolt'] = 1.2
+        self.env.bus_obs.loc[3, 'BusPUVolt'] = 1.05
+
+        # The bus voltage moved by 15 1/100ths per unit, and also
+        # moved into the "good" range.
+        self.assertAlmostEqual(
+            self.get_reward_no_action(),
+            15 * self.rewards['v_delta'] + self.rewards['v_in_bounds'])
+
+    def test_high_and_low_moved_in_range(self):
+        """Test multiple buses moving opposite directions, but in bounds
+        """
+        self.env.bus_obs_prev.loc[3, 'BusPUVolt'] = 1.07
+        self.env.bus_obs.loc[3, 'BusPUVolt'] = 1.05
+
+        self.env.bus_obs_prev.loc[0, 'BusPUVolt'] = 0.91
+        self.env.bus_obs.loc[0, 'BusPUVolt'] = 1.05
+
+        self.assertAlmostEqual(
+            self.get_reward_no_action(),
+            # high moved down
+            2 * self.rewards['v_delta']
+            # low moved up, but overshot
+            + ((1 - 0.91) - (1.05 - 1)) * 100 * self.rewards['v_delta']
+            # bonus for moving in band
+            + 2 * self.rewards['v_in_bounds'])
+
+    def test_changes_but_all_in_bounds(self):
+        """If voltages change, but all stay in bounds, there should be
+        no reward, only the penalty for taking an action.
+        """
+        self.env.bus_obs_prev.loc[0, 'BusPUVolt'] = 0.95
+        self.env.bus_obs.loc[0, 'BusPUVolt'] = 0.96
+
+        self.env.bus_obs_prev.loc[1, 'BusPUVolt'] = 1.0
+        self.env.bus_obs.loc[1, 'BusPUVolt'] = 1.01
+
+        self.env.bus_obs_prev.loc[2, 'BusPUVolt'] = 1.05
+        self.env.bus_obs.loc[2, 'BusPUVolt'] = 1.01
+
+        self.env.bus_obs_prev.loc[3, 'BusPUVolt'] = 0.8
+        self.env.bus_obs.loc[3, 'BusPUVolt'] = 0.8
+
+        self.assertAlmostEqual(self.env._compute_reward(),
+                               self.rewards['action'])
+
+    def test_low_v_gets_lower(self):
+        """Should get a penalty for moving a low voltage lower."""
+        self.env.bus_obs_prev.loc[2, 'BusPUVolt'] = 0.93
+        self.env.bus_obs.loc[2, 'BusPUVolt'] = 0.91
+
+        self.assertAlmostEqual(
+            self.get_reward_no_action(), -2 * self.rewards['v_delta'])
+
+    def test_high_v_gets_higher(self):
+        """Should get a penalty for moving a high voltage higher."""
+        self.env.bus_obs_prev.loc[3, 'BusPUVolt'] = 1.06
+        self.env.bus_obs.loc[3, 'BusPUVolt'] = 1.09
+
+        self.assertAlmostEqual(
+            self.get_reward_no_action(), -3 * self.rewards['v_delta'])
+
+    def test_in_bounds_moves_low(self):
+        """Should get penalty for voltage that was in bounds moving
+        out of bounds.
+        """
+        self.env.bus_obs_prev.loc[3, 'BusPUVolt'] = 1.05
+        self.env.bus_obs.loc[3, 'BusPUVolt'] = 0.9
+
+        self.assertAlmostEqual(
+            self.get_reward_no_action(),
+            # Moved 0.05 pu away from lower boundary, also gets extra
+            # penalty for leaving bounds.
+            -5 * self.rewards['v_delta'] + self.rewards['v_out_bounds'])
+
+    def test_in_bounds_moves_high(self):
+        """Should get penalty for voltage that was in bounds moving
+        out of bounds.
+        """
+        self.env.bus_obs_prev.loc[0, 'BusPUVolt'] = 0.96
+        self.env.bus_obs.loc[0, 'BusPUVolt'] = 0.94
+
+        self.assertAlmostEqual(
+            self.get_reward_no_action(),
+            # Moved 0.01 pu away from lower boundary, also gets extra
+            # penalty for leaving bounds.
+            -1 * self.rewards['v_delta'] + self.rewards['v_out_bounds'])
 
 
 if __name__ == '__main__':
