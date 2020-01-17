@@ -496,7 +496,7 @@ class VoltageControlEnv(gym.Env):
         # Warn if our generation capacity is more than double the max
         # load - this could mean generator maxes aren't realistic.
         gen_factor = self.gen_mw_capacity / self.max_load_mw
-        if gen_factor >= 2:
+        if gen_factor >= 1.5:
             self.log.warning(
                 f'The given generator capacity, {self.gen_mw_capacity:.2f} MW,'
                 f' is {gen_factor:.2f} times larger than the maximum load, '
