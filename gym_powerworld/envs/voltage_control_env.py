@@ -211,7 +211,10 @@ class VoltageControlEnv(gym.Env):
 
         # The following fields will be used for observations during
         # learning.
-        self.gen_obs_fields = self.gen_key_fields + self.GEN_OBS_FIELDS
+        if self.GEN_OBS_FIELDS is not None:
+            self.gen_obs_fields = self.gen_key_fields + self.GEN_OBS_FIELDS
+        else:
+            self.gen_obs_fields = None
 
         # Use the SimAuto Wrapper to get generator data from PowerWorld.
         self.gen_data = self.saw.GetParametersMultipleElement(
@@ -253,7 +256,10 @@ class VoltageControlEnv(gym.Env):
         self.num_loads = self.load_data.shape[0]
 
         # The following fields will be used for observations.
-        self.load_obs_fields = self.load_key_fields + self.LOAD_OBS_FIELDS
+        if self.LOAD_OBS_FIELDS is not None:
+            self.load_obs_fields = self.load_key_fields + self.LOAD_OBS_FIELDS
+        else:
+            self.load_obs_fields = None
 
         # Zero out constant current and constant impedance portions so
         # we simply have constant power. A warning will be emitted if
@@ -272,7 +278,10 @@ class VoltageControlEnv(gym.Env):
         self.bus_fields = self.bus_key_fields
 
         # The following fields will be used for observations.
-        self.bus_obs_fields = self.bus_key_fields + self.BUS_OBS_FIELDS
+        if self.BUS_OBS_FIELDS is not None:
+            self.bus_obs_fields = self.bus_key_fields + self.BUS_OBS_FIELDS
+        else:
+            self.bus_obs_fields = None
 
         # Get bus data from PowerWorld.
         self.bus_data = self.saw.GetParametersMultipleElement(
@@ -862,13 +871,19 @@ class VoltageControlEnv(gym.Env):
         self.load_obs_prev = self.load_obs
 
         # Get new data.
-        self.bus_obs = self.saw.GetParametersMultipleElement(
-            ObjectType='bus', ParamList=self.bus_obs_fields)
-        self.gen_obs = self.saw.GetParametersMultipleElement(
-            ObjectType='gen', ParamList=self.gen_obs_fields)
-        self.load_obs = self.saw.GetParametersMultipleElement(
-            ObjectType='load', ParamList=self.load_obs_fields
-        )
+        # Buses:
+        if self.bus_obs_fields is not None:
+            self.bus_obs = self.saw.GetParametersMultipleElement(
+                ObjectType='bus', ParamList=self.bus_obs_fields)
+        # Generators:
+        if self.gen_obs_fields is not None:
+            self.gen_obs = self.saw.GetParametersMultipleElement(
+                ObjectType='gen', ParamList=self.gen_obs_fields)
+        # Loads:
+        if self.load_obs_fields is not None:
+            self.load_obs = self.saw.GetParametersMultipleElement(
+                ObjectType='load', ParamList=self.load_obs_fields
+            )
 
         # That's it.
         return None
@@ -966,6 +981,32 @@ class VoltageControlEnv(gym.Env):
 
         # Otherwise, we're not done.
         return False
+
+
+class GridMindEnv(VoltageControlEnv):
+    """Environment for attempting to replicate the work done by the
+    State Grid Corporation of China, described in the following paper:
+
+    https://www.researchgate.net/publication/332630883_Autonomous_Voltage_Control_for_Grid_Operation_Using_Deep_Reinforcement_Learning
+
+    There should be a version on IEEEXplore soon.
+
+    Here's the summary:
+
+    States: Power flow solution, i.e. bus voltages and magnitudes and
+        line flows (P and Q).
+    Rewards: Each action receives the following rewards:
+        -> +100 for each bus between 0.95 and 1.05 p.u.
+        -> -50 for buses in the range [0.8, 0.95) or (1.05, 1.25]
+        -> -100 for buses < 0.8 or > 1.25.
+        Additionally, a final reward is given at the end of the episode,
+        which is the sum of each action reward divided by the number of
+        actions taken.
+    Control: In this paper, a single action is considered setting the
+        voltage set point of all generators at once. Generator voltage
+        set points are discretized to be in [0.95, 0.975, 1.0, 1.025,
+        1.05].
+    """
 
 
 class Error(Exception):
