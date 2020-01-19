@@ -710,16 +710,8 @@ class VoltageControlEnv(gym.Env):
         # Bump the action counter.
         self.action_count += 1
 
-        # Look up action and send to PowerWorld.
-        gen_idx = self.action_array[action, 0]
-        # TODO: it might be worth short-circuiting everything if the
-        #   action won't do anything (e.g. the generator is off).
-        voltage = self.gen_bins[self.action_array[action, 1]]
-        self.saw.ChangeParametersSingleElement(
-            ObjectType='gen', ParamList=self.gen_key_fields + ['GenVoltSet'],
-            Values=self.gen_data.loc[gen_idx, self.gen_key_fields].tolist()
-            + [voltage]
-        )
+        # Take the action.
+        self._take_action(action)
 
         # Solve the power flow and get an observation.
         try:
@@ -747,6 +739,21 @@ class VoltageControlEnv(gym.Env):
     def close(self):
         """Tear down SimAuto wrapper."""
         self.saw.exit()
+
+    def _take_action(self, action):
+        """Helper to make the appropriate updates in PowerWorld for a
+        given action.
+        """
+        # Look up action and send to PowerWorld.
+        gen_idx = self.action_array[action, 0]
+        # TODO: it might be worth short-circuiting everything if the
+        #   action won't do anything (e.g. the generator is off).
+        voltage = self.gen_bins[self.action_array[action, 1]]
+        self.saw.ChangeParametersSingleElement(
+            ObjectType='gen', ParamList=self.gen_key_fields + ['GenVoltSet'],
+            Values=self.gen_data.loc[gen_idx, self.gen_key_fields].tolist()
+            + [voltage]
+        )
 
     def _solve_and_observe(self):
         """Helper to solve the power flow and get an observation.
