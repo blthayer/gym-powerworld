@@ -1,10 +1,11 @@
+from abc import ABC, abstractmethod
 import gym
 from gym import spaces
 import numpy as np
 import pandas as pd
 import logging
 from esa import SAW, PowerWorldError
-from typing import Union, Tuple
+from typing import Union, Tuple, List
 from copy import deepcopy
 
 # When generating scenarios, we're drawing random generation to meet
@@ -39,44 +40,908 @@ LOW_V = 0.95
 HIGH_V = 1.05
 NOMINAL_V = 1.0
 
+# Instead of writing code to manage English rules, just hard code plural
+# mappings.
+PLURAL_MAP = {
+    'gen': 'gens',
+    'load': 'loads',
+    'bus': 'buses',
+    'branch': 'branches',
+    'shunt': 'shunts'
+}
 
-class VoltageControlEnv(gym.Env):
+
+# noinspection PyPep8Naming
+class DiscreteVoltageControlEnvBase(ABC, gym.Env):
+    """Base class for discrete voltage control environments.
+
+    Subclasses must set the following attributes in __init__:
+    - action_space
+    - num_obs
+    - observation_space
+
+    Subclasses must implement the following methods:
+    - _compute_loading
+    - _compute_generation
+    - _take_action
+
+    Note that the initialization method of this class solves the power
+    flow and calls the SaveState method, so subclasses may need to
+    repeat that if they make case modifications that they want reloaded
+    for each call to "reset."
+    """
+
+    ####################################################################
+    # Abstract class properties
+    ####################################################################
+
+    @property
+    @abstractmethod
+    def GEN_INIT_FIELDS(self) -> List[str]:
+        """All PowerWorld generator fields to be used during environment
+        initialization, sans key fields. Set to an empty list in
+        subclasses which do no use generator data for environment
+        initialization.
+        """
+
+    @property
+    @abstractmethod
+    def GEN_OBS_FIELDS(self) -> List[str]:
+        """All PowerWorld generator fields to be used when generating
+        an observation during a time step, sans key fields. Set to an
+        empty list in subclasses which do no use generator data for
+        observations.
+        """
+
+    @property
+    @abstractmethod
+    def GEN_RESET_FIELDS(self) -> List[str]:
+        """All PowerWorld generator fields to be used in the "reset"
+        method, sans key fields. Set to an empty list in subclasses
+        which do not change generator parameters during calls to
+        "reset."
+        """
+
+    @property
+    @abstractmethod
+    def LOAD_INIT_FIELDS(self) -> List[str]:
+        """All PowerWorld load fields to be used during environment
+        initialization, sans key fields. Set to an empty list in
+        subclasses which do no use load data for environment
+        initialization.
+        """
+
+    @property
+    @abstractmethod
+    def LOAD_OBS_FIELDS(self) -> List[str]:
+        """All PowerWorld load fields to be used when generating
+        an observation during a time step, sans key fields. Set to an
+        empty list in subclasses which do no use load data for
+        observations.
+        """
+
+    @property
+    @abstractmethod
+    def LOAD_RESET_FIELDS(self) -> List[str]:
+        """All PowerWorld load fields to be used in the "reset"
+        method, sans key fields. Set to an empty list in subclasses
+        which do not change load parameters during calls to
+        "reset."
+        """
+
+    @property
+    @abstractmethod
+    def BUS_INIT_FIELDS(self) -> List[str]:
+        """All PowerWorld bus fields to be used during environment
+        initialization, sans key fields. Set to an empty list in
+        subclasses which do no use bus data for environment
+        initialization.
+        """
+
+    @property
+    @abstractmethod
+    def BUS_OBS_FIELDS(self) -> List[str]:
+        """All PowerWorld bus fields to be used when generating
+        an observation during a time step, sans key fields. Set to an
+        empty list in subclasses which do no use bus data for
+        observations.
+        """
+
+    @property
+    @abstractmethod
+    def BUS_RESET_FIELDS(self) -> List[str]:
+        """All PowerWorld load fields to be used in the "reset"
+        method, sans key fields. Set to an empty list in subclasses
+        which do not change load parameters during calls to
+        "reset."
+        """
+
+    @property
+    @abstractmethod
+    def BRANCH_INIT_FIELDS(self) -> List[str]:
+        """All PowerWorld branch fields to be used during environment
+        initialization, sans key fields. Set to an empty list in
+        subclasses which do no use branch data for environment
+        initialization.
+        """
+
+    @property
+    @abstractmethod
+    def BRANCH_OBS_FIELDS(self) -> List[str]:
+        """All PowerWorld branch fields to be used when generating
+        an observation during a time step, sans key fields. Set to an
+        empty list in subclasses which do no use branch data for
+        observations.
+        """
+
+    @property
+    @abstractmethod
+    def BRANCH_RESET_FIELDS(self) -> List[str]:
+        """All PowerWorld branch fields to be used in the "reset"
+        method, sans key fields. Set to an empty list in subclasses
+        which do not change branch parameters during calls to
+        "reset."
+        """
+
+    @property
+    @abstractmethod
+    def SHUNT_INIT_FIELDS(self) -> List[str]:
+        """All PowerWorld shunt fields to be used during environment
+        initialization, sans key fields. Set to an empty list in
+        subclasses which do no use shunt data for environment
+        initialization.
+        """
+
+    @property
+    @abstractmethod
+    def SHUNT_OBS_FIELDS(self) -> List[str]:
+        """All PowerWorld shunt fields to be used when generating
+        an observation during a time step, sans key fields. Set to an
+        empty list in subclasses which do no use shunt data for
+        observations.
+        """
+
+    @property
+    @abstractmethod
+    def SHUNT_RESET_FIELDS(self) -> List[str]:
+        """All PowerWorld shunt fields to be used in the "reset"
+        method, sans key fields. Set to an empty list in subclasses
+        which do not change shunt parameters during calls to
+        "reset."
+        """
+
+    @property
+    @abstractmethod
+    def REWARDS(self) -> dict:
+        """Subclasses should implement a dictionary with default
+        rewards. Rewards should be given a positive sign, and penalties
+        should be given a negative sign.
+        """
+
+    ####################################################################
+    # Initialization
+    ####################################################################
+
+    def __init__(self, pwb_path: str, num_scenarios: int,
+                 max_load_factor: float = None,
+                 min_load_factor: float = None,
+                 min_load_pf: float = 0.8,
+                 lead_pf_probability: float = 0.1,
+                 load_on_probability: float = 0.8,
+                 num_gen_voltage_bins: int = 5,
+                 gen_voltage_range: Tuple[float, float] = (0.9, 1.1),
+                 seed: float = None,
+                 log_level=logging.INFO,
+                 rewards: Union[dict, None] = None,
+                 dtype=np.float32):
+        """Initialize the environment. Pull data needed up front,
+        create gen/loading cases, perform case checks, etc.
+
+        :param pwb_path: Full path to a PowerWorld .pwb file
+            representing the grid which the agent will control.
+        :param num_scenarios: Number of different case initialization
+            scenarios to create. Note it is not guaranteed that the
+            power flow will solve successfully for all cases, so the
+            number of actual usable cases will be less than the
+            num_scenarios.
+        :param max_load_factor: Factor which when multiplied by the
+            current total system load represents the maximum allowable
+            system loading for training episodes in MW. E.g., if the
+            current sum of all the active power components of the loads
+            is 100 MW and the max_load_factor is 2, then the maximum
+            possible active power loading for any given episode will be
+            200 MW. If the max_load_factor is None, the maximum
+            system loading will be computed by the sum of generator
+            maximum MW outputs.
+        :param min_load_factor: Similar to the max_load_factor, this
+            number is multiplied with the current total system load to
+            determine the minimum active power loading for an episode.
+            If None, the minimum system loading will be computed by the
+            sum of generator minimum MW outputs.
+        :param min_load_pf: Minimum load power factor to be used when
+            generating loading scenarios. Should be a positive number
+            in the interval (0, 1].
+        :param lead_pf_probability: Probability on a load by load
+            basis that the power factor will be leading. Should be
+            a positive number in the interval [0, 1].
+        :param load_on_probability: For each scenario, probability
+            to determine on a load by load basis which are "on" (i.e.
+            have power consumption > 0). Should be a positive number
+            on the interval (0, 1].
+        :param num_gen_voltage_bins: Number of intervals/bins to split
+            generator voltage set points into. I.e.,
+            if gen_voltage_range=(0.95, 1.05) and num_gen_voltage_bins
+            is 5, the generator set points will be discretized into the
+            set {0.95, 0.975, 1.0, 1.025, 1.05}.
+        :param gen_voltage_range: Minimum and maximum allowed generator
+            voltage regulation set points (in per unit).
+        :param seed: Seed for random number.
+        :param log_level: Log level for the environment's logger. Pass
+            a constant from the logging module, e.g. logging.DEBUG or
+            logging.INFO.
+        :param rewards: Dictionary of rewards/penalties. For available
+            fields and their descriptions, see the class constant
+            REWARDS. This dictionary can be partial, i.e. include only
+            a subset of fields contained in REWARDS. To use the default
+            rewards, pass in None.
+        :param dtype: Numpy datatype to be used for most numbers. It's
+            common to use np.float32 for machine learning tasks to
+            reduce memory consumption.
+        """
+        ################################################################
+        # Logging, seeding, SAW initialization, simple attributes
+        ################################################################
+        # Set up log.
+        self.log = logging.getLogger(self.__class__.__name__)
+        self.log.setLevel(log_level)
+
+        # Handle random seeding up front.
+        self.rng = np.random.default_rng(seed)
+
+        # Initialize a SimAuto wrapper. Use early binding since it's
+        # faster.
+        self.saw = SAW(pwb_path, early_bind=True)
+        self.log.debug('PowerWorld case loaded.')
+
+        # Track data type.
+        self.dtype = dtype
+
+        # Number of scenarios/episodes to generate. Note that not all
+        # will be usable.
+        self.num_scenarios = num_scenarios
+
+        # Scenario index starts at one, and is incremented for each
+        # episode.
+        self.scenario_idx = 0
+
+        ################################################################
+        # Initialize PowerWorld related attributes, get data from case
+        ################################################################
+        # Following the principle of least astonishment, initialize all
+        # attributes that will hold data. The attributes will be
+        # overridden in more compact/generic helper methods.
+        #
+        # Start with key fields.
+        self.gen_key_fields: Union[list, None] = None
+        self.load_key_fields: Union[list, None] = None
+        self.bus_key_fields: Union[list, None] = None
+        self.branch_key_fields: Union[list, None] = None
+        self.shunt_key_fields: Union[list, None] = None
+
+        # Fields used for environment initialization. These will include
+        # key fields.
+        self.gen_init_fields: Union[list, None] = None
+        self.load_init_fields: Union[list, None] = None
+        self.bus_init_fields: Union[list, None] = None
+        self.branch_init_fields: Union[list, None] = None
+        self.shunt_init_fields: Union[list, None] = None
+
+        # Fields used for observations. These will include key fields.
+        self.gen_obs_fields: Union[list, None] = None
+        self.load_obs_fields: Union[list, None] = None
+        self.bus_obs_fields: Union[list, None] = None
+        self.branch_obs_fields: Union[list, None] = None
+        self.shunt_obs_fields: Union[list, None] = None
+
+        # Fields used during "reset." These will include key fields.
+        self.gen_reset_fields: Union[list, None] = None
+        self.load_reset_fields: Union[list, None] = None
+        self.bus_reset_fields: Union[list, None] = None
+        self.branch_reset_fields: Union[list, None] = None
+        self.shunt_reset_fields: Union[list, None] = None
+
+        # Now data which will be used during initialization.
+        self.gen_init_data: Union[pd.DataFrame, None] = None
+        self.load_init_data: Union[pd.DataFrame, None] = None
+        self.bus_init_data: Union[pd.DataFrame, None] = None
+        self.branch_init_data: Union[pd.DataFrame, None] = None
+        self.shunt_init_data: Union[pd.DataFrame, None] = None
+
+        # Data which will be used in observations.
+        self.gen_obs_data: Union[pd.DataFrame, None] = None
+        self.load_obs_data: Union[pd.DataFrame, None] = None
+        self.bus_obs_data: Union[pd.DataFrame, None] = None
+        self.branch_obs_data: Union[pd.DataFrame, None] = None
+        self.shunt_obs_data: Union[pd.DataFrame, None] = None
+
+        # Some environments may want to keep data on the previous
+        # observations.
+        self.gen_obs_data_prev: Union[pd.DataFrame, None] = None
+        self.load_obs_data_prev: Union[pd.DataFrame, None] = None
+        self.bus_obs_data_prev: Union[pd.DataFrame, None] = None
+        self.branch_obs_data_prev: Union[pd.DataFrame, None] = None
+        self.shunt_obs_data_prev: Union[pd.DataFrame, None] = None
+
+        # Data which will be used/set in the "reset" method.
+        self.gen_reset_data: Union[pd.DataFrame, None] = None
+        self.load_reset_data: Union[pd.DataFrame, None] = None
+        self.bus_reset_data: Union[pd.DataFrame, None] = None
+        self.branch_reset_data: Union[pd.DataFrame, None] = None
+        self.shunt_reset_data: Union[pd.DataFrame, None] = None
+
+        # To avoid constant calls to .shape[0], we'll track the number
+        # of elements of each type in the case. None will indicate
+        # we didn't even look.
+        self.num_gens: Union[int, None] = None
+        self.num_loads: Union[int, None] = None
+        self.num_buses: Union[int, None] = None
+        self.num_branches: Union[int, None] = None
+        self.num_shunts: Union[int, None] = None
+
+        # Call helper to fill in most of the attributes we just listed
+        # above. All "fields" attributes will be filled, unless the
+        # corresponding class constant is the empty list. All
+        # "init_data" attributes will be filled by querying PowerWorld.
+        self._fill_init_attributes()
+
+        ################################################################
+        # Generator fields and data
+        ################################################################
+        # Zero out negative minimum generation limits. A warning will
+        # be emitted if generators have negative limits.
+        self._zero_negative_gen_mw_limits()
+
+        # For convenience, compute the maximum generation capacity.
+        # Depending on max_load_factor, gen_mw_capacity could also
+        # represent maximum loading.
+        # TODO: Confirm that the produce/consume convention is correct.
+        self.gen_mw_capacity = self.gen_init_data['GenMWMax'].sum()
+        self.gen_mvar_produce_capacity = self.gen_init_data['GenMVRMax'].sum()
+        # TODO: Should we use abs here?
+        self.gen_mvar_consume_capacity = self.gen_init_data['GenMVRMin'].sum()
+
+        ################################################################
+        # Load fields and data
+        ################################################################
+        # Zero out constant current and constant impedance portions so
+        # we simply have constant power. A warning will be emitted if
+        # there are loads with non-zero constant current or impedance
+        # portions.
+        # TODO: in the future, we should allow for loads beyond constant
+        #  power.
+        self._zero_i_z_loads()
+
+        ################################################################
+        # Minimum and maximum system loading
+        ################################################################
+        # Compute maximum system loading.
+        if max_load_factor is not None:
+            # If given a max load factor, multiply it by the current
+            # system load.
+            self.max_load_mw = \
+                self.load_init_data['LoadSMW'].sum() * max_load_factor
+
+            # Ensure the maximum loading is <= generation capacity.
+            self._check_max_load(max_load_factor)
+        else:
+            # If not given a max load factor, the maximum loading will
+            # simply be generation capacity.
+            self.max_load_mw = self.gen_mw_capacity
+
+        # Compute minimum system loading.
+        if min_load_factor is not None:
+            self.min_load_mw = \
+                self.load_init_data['LoadSMW'].sum() * min_load_factor
+
+            # Ensure the minimum loading is feasible based on the
+            # generation.
+            self._check_min_load(min_load_factor)
+        else:
+            # If not given a min load factor, minimum loading is simply
+            # the minimum generation of minimum generation.
+            self.min_load_mw = self.gen_init_data['GenMWMin'].min()
+
+        ################################################################
+        # Scenario/episode initialization: loads
+        ################################################################
+        # Time to generate scenarios.
+        # Initialize list to hold all information pertaining to all
+        # scenarios.
+        self.scenarios = []
+
+        # Compute total loading and loading for each individual load
+        # for all scenarios.
+        self.total_load_mw, self.loads_mw, self.loads_mvar = \
+            self._compute_loading(load_on_probability=load_on_probability,
+                                  min_load_pf=min_load_pf,
+                                  lead_pf_probability=lead_pf_probability)
+
+        ################################################################
+        # Scenario/episode initialization: generation
+        ################################################################
+        # Compute each individual generator's active power contribution
+        # for each loading scenario.
+        self.gen_mw = self._compute_generation()
+
+        ################################################################
+        # Action space
+        ################################################################
+        # Start by creating the generator bins.
+        self.gen_bins = np.linspace(gen_voltage_range[0], gen_voltage_range[1],
+                                    num_gen_voltage_bins)
+
+        # Subclasses should set the action_space based on the gen_bins
+        # and/or other factors.
+
+        ################################################################
+        # Observation space definition
+        ################################################################
+        # Subclasses should set num_obs and observation_space
+        # attributes.
+
+        # Initialize attribute for checking if all voltages are in
+        # range. This will be used to check if an episode is done, and
+        # will be reset in the "reset" method.
+        self.all_v_in_range = False
+
+        # We'll track how many actions the agent has taken in an episode
+        # as part of the stopping criteria.
+        self.action_count = 0
+
+        ################################################################
+        # Set rewards.
+        ################################################################
+        self.rewards = deepcopy(self.REWARDS)
+        self._overwrite_rewards(rewards)
+
+        ################################################################
+        # Solve power flow, save state.
+        ################################################################
+        # Solve the initial power flow, and save the state for later
+        # loading. This is done so that PowerWorld doesn't get stuck
+        # in a low voltage solution when moving from a bad case to a
+        # feasible case.
+        #
+        # Ensure this is the absolute LAST thing done
+        # in __init__ so that changes we've made to the case don't get
+        # overridden.
+        self.saw.SolvePowerFlow()
+        self.saw.SaveState()
+
+        # All done.
+
+    ####################################################################
+    # Public methods
+    ####################################################################
+
+    def render(self, mode='human'):
+        """Not planning to implement this for now. However, it could
+        make for some nice graphics/presentations related to learning.
+
+        Also, PowerWorld does have the option to show the one line, so
+        this could be interesting down the line.
+        """
+        raise NotImplementedError
+
+    def reset(self):
+        """Advance to the next episode/scenario. To do so, generators
+        will be turned on/off, generator MW set points will be set,
+        and load P/Q will be set. Finally, the power flow will be
+        solved and an initial observation will be returned.
+        """
+        # Reset the action counter.
+        self.action_count = 0
+
+        # Reset all_v_in_range.
+        self.all_v_in_range = False
+
+        done = False
+
+        while (not done) & (self.scenario_idx < self.num_scenarios):
+            # Load the initial state of the system to avoid getting
+            # stuck in a low voltage solution from a previous solve.
+            self.saw.LoadState()
+
+            # Get generators and loads set up for this scenario.
+            self._set_gens_for_scenario()
+            self._set_loads_for_scenario()
+
+            # Solve the power flow.
+            try:
+                obs = self._solve_and_observe()
+            except (PowerWorldError, LowVoltageError) as exc:
+                # This scenario is bad. Move on.
+                self.log.debug(
+                    f'Scenario {self.scenario_idx} failed. Error message: '
+                    f'{exc.args[0]}')
+            else:
+                # Success! The power flow solved, and no voltages went
+                # below the minimum. Signify we're done looping.
+                done = True
+            finally:
+                # Always increment the scenario index.
+                self.scenario_idx += 1
+
+        # Raise exception if we've gone through all the scenarios.
+        # TODO: better exception.
+        if self.scenario_idx >= self.num_scenarios:
+            raise UserWarning('We have gone through all scenarios.')
+
+        # Return the observation.
+        # noinspection PyUnboundLocalVariable
+        return obs
+
+    def step(self, action):
+        """Change generator set point, solve power flow, compute reward.
+        """
+        # Bump the action counter.
+        self.action_count += 1
+
+        # Take the action.
+        self._take_action(action)
+
+        # Solve the power flow and get an observation.
+        try:
+            obs = self._solve_and_observe()
+        except (PowerWorldError, LowVoltageError):
+            # The power flow failed to solve or bus voltages went below
+            # the minimum. This episode is complete.
+            # TODO: Should our observation be None?
+            obs = None
+            done = True
+            # An action was taken, so include both the action and
+            # failure penalties.
+            reward = self.rewards['fail'] + self.rewards['action']
+        else:
+            # The power flow successfully solved. Compute the reward
+            # and check to see if this episode is done.
+            reward = self._compute_reward()
+            done = self._check_done()
+
+        # TODO: update the fourth return (info) to, you know, actually
+        #   give info.
+        # That's it.
+        return obs, reward, done, dict()
+
+    def close(self):
+        """Tear down SimAuto wrapper."""
+        self.saw.exit()
+
+    ####################################################################
+    # Private methods
+    ####################################################################
+
+    def _fill_init_attributes(self):
+        """Helper to loop and set attributes for gens, loads, buses,
+        branches, and shunts. This method will set the following:
+
+        <obj>_key_fields
+        <obj>_init_fields
+        <obj>_obs_fields
+        <obj>_reset_fields
+        <obj>_init_data
+        num_<obj_plural>
+        """
+        for obj in ('gen', 'load', 'bus', 'branch', 'shunt'):
+            # Get the key fields.
+            kf = self.saw.get_key_field_list(obj)
+
+            # Set attribute.
+            setattr(self, obj + '_key_fields', kf)
+
+            # Add key fields to init, obs, and reset fields.
+            for attr in ('init', 'obs', 'reset'):
+                # Get class constant (cc) list.
+                cc = getattr(self, f'{obj.upper()}_{attr.upper()}_FIELDS')
+
+                # Only set the attribute if the class constant has a
+                # length greater than 0. Otherwise, leave it as the
+                # default, None. We always want it set for init,
+                # however. This is because we'll pull data from
+                # PowerWorld to get the number of elements, for
+                # instance.
+                if (attr == 'init') or (len(cc) > 0):
+                    # Set instance attribute by combining key fields and
+                    # class constant.
+                    setattr(self, f'{obj}_{attr}_fields', kf + cc)
+
+            # Pull and set initialization data, as well as computing
+            # the number of elements present.
+            data = self.saw.GetParametersMultipleElement(
+                ObjectType=obj,
+                ParamList=getattr(self, f'{obj}_init_fields'))
+
+            plural = PLURAL_MAP[obj]
+
+            # ESA will return None if the objects are not present.
+            if data is not None:
+                setattr(self, f'{obj}_init_data', data)
+                setattr(self, f'num_{plural}', data.shape[0])
+            else:
+                setattr(self, f'num_{plural}', 0)
+
+    def _zero_negative_gen_mw_limits(self):
+        """Helper to zero out generator MW limits which are < 0."""
+        gen_less_0 = self.gen_init_data['GenMWMin'] < 0
+        if (self.gen_init_data['GenMWMin'] < 0).any():
+            self.gen_init_data.loc[gen_less_0, 'GenMWMin'] = 0.0
+            self.saw.change_and_confirm_params_multiple_element(
+                'gen', self.gen_init_data.loc[:, self.gen_key_fields
+                                              + ['GenMWMin']])
+            self.log.warning(f'{gen_less_0.sum()} generators with '
+                             'GenMWMin < 0 have had GenMWMin set to 0.')
+
+    def _zero_i_z_loads(self):
+        """Helper to zero out constant current and constant impedance
+        portions of loads.
+        """
+        # Warn if we have constant current or constant impedance load
+        # values. Then, zero out the constant current and constant
+        # impedance portions.
+        if (self.load_init_data[LOAD_I_Z] != 0.0).any().any():
+            self.log.warning('The given PowerWorld case has loads with '
+                             'non-zero constant current and constant impedance'
+                             ' portions. These will be zeroed out.')
+            self.load_init_data.loc[:, LOAD_I_Z] = 0.0
+            self.saw.change_and_confirm_params_multiple_element(
+                'Load', self.load_init_data.loc[:, self.load_key_fields
+                                                + LOAD_I_Z])
+
+    def _check_max_load(self, max_load_factor):
+        """Ensure maximum loading is less than generation capacity. Also
+        warn if generation capacity is >= 2 * maximum loading.
+        """
+        if self.max_load_mw > self.gen_mw_capacity:
+            # TODO: Better exception.
+            raise UserWarning(
+                f'The given max_load_factor, {max_load_factor:.3f} '
+                f'resulted in maximum loading of {self.max_load_mw:.3f} MW'
+                ', but the generator active power capacity is only '
+                f'{self.gen_mw_capacity:.3f} MW. Reduce the '
+                'max_load_factor and try again.')
+
+        # Warn if our generation capacity is more than double the max
+        # load - this could mean generator maxes aren't realistic.
+        gen_factor = self.gen_mw_capacity / self.max_load_mw
+        if gen_factor >= 1.5:
+            self.log.warning(
+                f'The given generator capacity, {self.gen_mw_capacity:.2f} MW,'
+                f' is {gen_factor:.2f} times larger than the maximum load, '
+                f'{self.max_load_mw:.2f} MW. This could indicate that '
+                'the case does not have proper generator limits set up.')
+
+    def _check_min_load(self, min_load_factor):
+        """Ensure minimum loading is greater than the minimum generator
+        minimum generation.
+        """
+        min_gen = self.gen_init_data['GenMWMin'].min()
+        if self.min_load_mw < min_gen:
+            # TODO: better exception.
+            raise UserWarning(
+                f'The given min_load_factor, {min_load_factor:.3f}, '
+                'results in a minimum system loading of '
+                f'{self.min_load_mw:3f} MW, but the lowest generation '
+                f'possible is {min_gen:.3f} MW. Increase the '
+                'min_load_factor and try again.')
+
+    def _overwrite_rewards(self, rewards):
+        """Simple helper to overwrite default rewards with user provided
+         rewards.
+         """
+        if rewards is None:
+            # If not given rewards, do nothing.
+            return
+        else:
+            # If given rewards, loop over the dictionary and set fields.
+            for key, value in rewards.items():
+                # Raise exception if key is invalid.
+                if key not in self.REWARDS:
+                    raise KeyError(
+                        f'The given rewards key, {key}, is invalid. Please '
+                        'only use keys in the class constant, REWARDS.')
+
+                # If we're here, the key is valid. Set it.
+                self.rewards[key] = value
+
+    def _solve_and_observe(self):
+        """Helper to solve the power flow and get an observation.
+
+        :raises LowVoltageError: If any bus voltage is below MIN_V after
+            solving the power flow.
+        :raises PowerWorldError: If PowerWorld fails to solve the power
+            flow.
+        """
+        # Start by solving the power flow. This will raise a
+        # PowerWorldError if it fails to solve.
+        self.saw.SolvePowerFlow()
+
+        # Get new observations, rotate old ones.
+        self._rotate_and_get_observation_frames()
+
+        # Check if all voltages are in range.
+        self.all_v_in_range = (
+                ((self.bus_obs_data['BusPUVolt'] < LOW_V)
+                 & (self.bus_obs_data['BusPUVolt'] > HIGH_V)).sum()
+                == 0
+        )
+
+        # If any voltages are too low, raise exception.
+        if (self.bus_obs_data['BusPUVolt'] < MIN_V).any():
+            num_low = (self.bus_obs_data['BusPUVolt'] < MIN_V).sum()
+            raise LowVoltageError(
+                f'{num_low} buses were below {MIN_V:.2f} p.u.'
+            )
+
+        # Get and return a properly arranged observation.
+        return self._get_observation()
+
+    def _rotate_and_get_observation_frames(self):
+        """Simple helper to get new observation DataFrames, and rotate
+        the previous frames into the correct attributes.
+        """
+        # Rotate.
+        self.bus_obs_data_prev = self.bus_obs_data
+        self.gen_obs_data_prev = self.gen_obs_data
+        self.load_obs_data_prev = self.load_obs_data
+
+        # Get new data.
+        # Buses:
+        if self.bus_obs_fields is not None:
+            self.bus_obs_data = self.saw.GetParametersMultipleElement(
+                ObjectType='bus', ParamList=self.bus_obs_fields)
+        # Generators:
+        if self.gen_obs_fields is not None:
+            self.gen_obs_data = self.saw.GetParametersMultipleElement(
+                ObjectType='gen', ParamList=self.gen_obs_fields)
+        # Loads:
+        if self.load_obs_fields is not None:
+            self.load_obs_data = self.saw.GetParametersMultipleElement(
+                ObjectType='load', ParamList=self.load_obs_fields
+            )
+
+        # That's it.
+        return None
+
+    def _set_gens_for_scenario(self):
+        """Helper to set up generators in the case for this
+        episode/scenario. This method should only be called by reset.
+        """
+        # Extract a subset of the generator data.
+        gens = self.gen_init_data.loc[:, self.gen_key_fields
+                                      + self.GEN_RESET_FIELDS]
+
+        # Turn generators on/off and set their MW set points.
+        gens.loc[:, 'GenMW'] = self.gen_mw[self.scenario_idx, :]
+        gen_g_0 = self.gen_mw[self.scenario_idx, :] > 0
+        gens.loc[gen_g_0, 'GenStatus'] = 'Closed'
+        gens.loc[~gen_g_0, 'GenStatus'] = 'Open'
+        # TODO: may want to use a faster command like
+        #   ChangeParametersMultipleElement. NOTE: Will need to
+        #   update patching in tests if this route is taken.
+        self.saw.change_and_confirm_params_multiple_element('gen', gens)
+
+    def _set_loads_for_scenario(self):
+        """Helper to set up loads in the case for this episode/scenario.
+        This method should only be called by reset.
+        """
+        # Extract a subset of the load data.
+        loads = self.load_init_data.loc[:, self.load_key_fields
+                                        + self.LOAD_RESET_FIELDS]
+
+        # Set P and Q.
+        loads.loc[:, 'LoadSMW'] = self.loads_mw[self.scenario_idx, :]
+        loads.loc[:, 'LoadSMVR'] = self.loads_mvar[self.scenario_idx, :]
+        # TODO: may want to use a faster command like
+        #   ChangeParametersMultipleElement. NOTE: Will need to
+        #   update patching in tests if this route is taken.
+        self.saw.change_and_confirm_params_multiple_element('load', loads)
+
+    def _check_done(self):
+        """Check whether (True) or not (False) and episode is done. Call
+        this after calling _solve_and_observe.
+        """
+        # If the number of actions taken in this episode has exceeded
+        # a threshold, we're done.
+        # TODO: Stop hard-coding number of actions
+        if self.action_count > (self.num_gens * 2):
+            return True
+
+        # If all voltages are in range, we're done.
+        if self.all_v_in_range:
+            return True
+
+        # Otherwise, we're not done.
+        return False
+
+    ####################################################################
+    # Abstract methods
+    ####################################################################
+
+    @abstractmethod
+    def _compute_loading(self, load_on_probability, min_load_pf,
+                         lead_pf_probability):
+        """Subclasses should implement a _compute_loading method which
+        computes loading for each scenario. The method should return
+        three arrays: one of dimension (num_scenarios,) representing
+        total load for each scenario and two arrays of dimension
+        (num_scenarios, num_loads) representing individual load MW and
+        Mvar, respectively.
+
+        See initialization inputs for descriptions of parameters.
+        """
+        pass
+
+    @abstractmethod
+    def _compute_generation(self):
+        """Subclasses should implement a _compute_generation method
+        which allocates generator output for each loading scenario. The
+        return array should be of dimension (num_scenarios, num_gens).
+        """
+        pass
+
+    @abstractmethod
+    def _take_action(self, action):
+        """Subclasses should implement a _take_action method which takes
+        a given action, looks up what it does, and takes the action in
+        the PowerWorld simulator. The _take_action method does not need
+        to solve the power flow.
+        """
+        pass
+
+    @abstractmethod
+    def _get_observation(self):
+        """Subclasses should implement a _get_observation method which
+        returns an observation.
+        """
+
+    @abstractmethod
+    def _compute_reward(self):
+        """Subclasses should implement a _compute_reward method which
+        computes a reward for a given action.
+        """
+
+
+class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     """Environment for performing voltage control with the PowerWorld
     Simulator.
     """
-
-    # All PowerWorld generator fields that will be used during
-    # environment initialization, sans key fields.
-    GEN_FIELDS = ['BusCat', 'GenMW', 'GenMVR', 'GenVoltSet', 'GenMWMax',
-                  'GenMWMin', 'GenMVRMax', 'GenMVRMin', 'GenStatus']
-
-    # PowerWorld generator fields which will be used when generating
-    # an observation during a time step.
+    # Gen fields. See base class for comments.
+    GEN_INIT_FIELDS = ['BusCat', 'GenMW', 'GenMVR', 'GenVoltSet', 'GenMWMax',
+                       'GenMWMin', 'GenMVRMax', 'GenMVRMin', 'GenStatus']
     GEN_OBS_FIELDS = ['GenMW', 'GenMWMax', 'GenMVA', 'GenMVRPercent',
                       'GenStatus']
-
-    # Fields which will be used to modify the generators when calling
-    # the "reset" method, sans key fields.
     # TODO: May need to add voltage set point here.
     GEN_RESET_FIELDS = ['GenMW', 'GenStatus']
 
-    # All PowerWorld load fields that will be used during environment
-    # initialization, sans key fields.
-    LOAD_FIELDS = LOAD_P + LOAD_I_Z
-
-    # PowerWorld load fields that will be used when generating an
-    # observation during a time step. Voltage will be handled at the
-    # bus level rather than the load level.
-    LOAD_OBS_FIELDS = LOAD_P + ['PowerFactor']
-
-    # Fields which will be used to modify the loads when calling the
-    # "reset" method, sans key fields.
+    # Load fields.
+    LOAD_INIT_FIELDS = LOAD_P + LOAD_I_Z
+    LOAD_OBS_FIELDS = LOAD_P + ['PowerFactor', ]
     LOAD_RESET_FIELDS = LOAD_P
 
-    # Bus fields for environment initialization will simply be the
-    # key fields, which are not listed here. During a time step, we'll
-    # want the per unit voltage at the bus.
-    BUS_OBS_FIELDS = ['BusPUVolt']
+    # Bus fields.
+    BUS_INIT_FIELDS = []
+    BUS_OBS_FIELDS = ['BusPUVolt', ]
+    BUS_RESET_FIELDS = []
+
+    # Branch fields.
+    BRANCH_INIT_FIELDS = []
+    BRANCH_OBS_FIELDS = []
+    BRANCH_RESET_FIELDS = []
+
+    # Shunt fields. TODO
+    SHUNT_INIT_FIELDS = []
+    SHUNT_OBS_FIELDS = []
+    SHUNT_RESET_FIELDS = []
 
     # Specify default rewards.
     # NOTE: When computing rewards, all reward components will be
@@ -174,173 +1039,17 @@ class VoltageControlEnv(gym.Env):
             common to use np.float32 for machine learning tasks to
             reduce memory consumption.
         """
-        ################################################################
-        # Logging, seeding, SAW initialization, simple attributes
-        ################################################################
-        # Set up log.
-        self.log = logging.getLogger(self.__class__.__name__)
-        self.log.setLevel(log_level)
-
-        # Handle random seeding up front.
-        self.rng = np.random.default_rng(seed)
-
-        # Initialize a SimAuto wrapper. Use early binding since it's
-        # faster.
-        self.saw = SAW(pwb_path, early_bind=True)
-        self.log.debug('PowerWorld case loaded.')
-
-        # Track data type.
-        self.dtype = dtype
-
-        # Number of scenarios/episodes to generate. Note that not all
-        # will be usable.
-        self.num_scenarios = num_scenarios
-
-        # Scenario index starts at one, and is incremented for each
-        # episode.
-        self.scenario_idx = 0
-        ################################################################
-        # Generator fields and data
-        ################################################################
-        # Get generator data.
-        # Start by getting a listing of the key fields.
-        self.gen_key_fields = self.saw.get_key_field_list('gen')
-
-        # Define all the parameters we'll need for initialization.
-        self.gen_fields = self.gen_key_fields + self.GEN_FIELDS
-
-        # The following fields will be used for observations during
-        # learning.
-        if self.GEN_OBS_FIELDS is not None:
-            self.gen_obs_fields = self.gen_key_fields + self.GEN_OBS_FIELDS
-        else:
-            self.gen_obs_fields = None
-
-        # Use the SimAuto Wrapper to get generator data from PowerWorld.
-        self.gen_data = self.saw.GetParametersMultipleElement(
-            ObjectType='gen', ParamList=self.gen_fields)
-
-        # For convenience, get the number of generators.
-        self.num_gens = self.gen_data.shape[0]
-
-        # Zero out negative minimum generation limits. A warning will
-        # be emitted if generators have negative limits.
-        self._zero_negative_gen_mw_limits()
-
-        # For convenience, compute the maximum generation capacity.
-        # Depending on max_load_factor, gen_mw_capacity could also
-        # represent maximum loading.
-        # TODO: Confirm that the produce/consume convention is correct.
-        self.gen_mw_capacity = self.gen_data['GenMWMax'].sum()
-        self.gen_mvar_produce_capacity = self.gen_data['GenMVRMax'].sum()
-        # TODO: Should we use abs here?
-        self.gen_mvar_consume_capacity = self.gen_data['GenMVRMin'].sum()
-
-        ################################################################
-        # Load fields and data
-        ################################################################
-        # Get load data.
-        # TODO: Somehow need to ensure that the only active load models
-        #   are ZIP.
-        # Get key fields for loads.
-        self.load_key_fields = self.saw.get_key_field_list('load')
-
-        # Combine key fields and all fields needed for initialization.
-        self.load_fields = self.load_key_fields + self.LOAD_FIELDS
-
-        # Query PowerWorld for the load data.
-        self.load_data = self.saw.GetParametersMultipleElement(
-            ObjectType='load', ParamList=self.load_fields)
-
-        # Total number of loads for convenience.
-        self.num_loads = self.load_data.shape[0]
-
-        # The following fields will be used for observations.
-        if self.LOAD_OBS_FIELDS is not None:
-            self.load_obs_fields = self.load_key_fields + self.LOAD_OBS_FIELDS
-        else:
-            self.load_obs_fields = None
-
-        # Zero out constant current and constant impedance portions so
-        # we simply have constant power. A warning will be emitted if
-        # there are loads with non-zero constant current or impedance
-        # portions.
-        # TODO: in the future, we should allow for loads beyond constant
-        #  power.
-        self._zero_i_z_loads()
-
-        ################################################################
-        # Bus fields and data
-        ################################################################
-        # Get bus key fields.
-        self.bus_key_fields = self.saw.get_key_field_list('bus')
-        # We'll only be fetching the bus key fields initially.
-        self.bus_fields = self.bus_key_fields
-
-        # The following fields will be used for observations.
-        if self.BUS_OBS_FIELDS is not None:
-            self.bus_obs_fields = self.bus_key_fields + self.BUS_OBS_FIELDS
-        else:
-            self.bus_obs_fields = None
-
-        # Get bus data from PowerWorld.
-        self.bus_data = self.saw.GetParametersMultipleElement(
-            ObjectType='bus', ParamList=self.bus_key_fields)
-
-        # For convenience, track number of buses.
-        self.num_buses = self.bus_data.shape[0]
-
-        ################################################################
-        # Minimum and maximum system loading
-        ################################################################
-        # Compute maximum system loading.
-        if max_load_factor is not None:
-            # If given a max load factor, multiply it by the current
-            # system load.
-            self.max_load_mw = \
-                self.load_data['LoadSMW'].sum() * max_load_factor
-
-            # Ensure the maximum loading is <= generation capacity.
-            self._check_max_load(max_load_factor)
-        else:
-            # If not given a max load factor, the maximum loading will
-            # simply be generation capacity.
-            self.max_load_mw = self.gen_mw_capacity
-
-        # Compute minimum system loading.
-        if min_load_factor is not None:
-            self.min_load_mw = \
-                self.load_data['LoadSMW'].sum() * min_load_factor
-
-            # Ensure the minimum loading is feasible based on the
-            # generation.
-            self._check_min_load(min_load_factor)
-        else:
-            # If not given a min load factor, minimum loading is simply
-            # the minimum generation of minimum generation.
-            self.min_load_mw = self.gen_data['GenMWMin'].min()
-
-        ################################################################
-        # Scenario/episode initialization: loads
-        ################################################################
-        # Time to generate scenarios.
-        # Initialize list to hold all information pertaining to all
-        # scenarios.
-        self.scenarios = []
-
-        # Compute total loading and loading for each individual load
-        # for all scenarios.
-        self.total_load_mw, self.loads_mw, self.loads_mvar = \
-            self._compute_loading(load_on_probability=load_on_probability,
-                                  min_load_pf=min_load_pf,
-                                  lead_pf_probability=lead_pf_probability)
-
-        ################################################################
-        # Scenario/episode initialization: generation
-        ################################################################
-        # Compute each individual generator's active power contribution
-        # for each loading scenario.
-        self.gen_mw = self._compute_generation()
+        # Start by calling super constructor.
+        super().__init__(
+            pwb_path=pwb_path, num_scenarios=num_scenarios,
+            max_load_factor=max_load_factor, min_load_factor=min_load_factor,
+            min_load_pf=min_load_pf,
+            lead_pf_probability=lead_pf_probability,
+            load_on_probability=load_on_probability,
+            num_gen_voltage_bins=num_gen_voltage_bins,
+            gen_voltage_range=gen_voltage_range,
+            seed=seed, log_level=log_level, rewards=rewards,
+            dtype=dtype)
 
         ################################################################
         # Action space definition
@@ -348,13 +1057,6 @@ class VoltageControlEnv(gym.Env):
         # Create action space by discretizing generator set points.
         self.action_space = spaces.Discrete(self.num_gens
                                             * num_gen_voltage_bins)
-
-        # Now, map each element in the action space to a generator
-        # set point.
-        #
-        # Start by creating the generator bins.
-        self.gen_bins = np.linspace(gen_voltage_range[0], gen_voltage_range[1],
-                                    num_gen_voltage_bins)
 
         # The action array is a simple mapping array which corresponds
         # 1:1 with the action_space. Each row represents an action,
@@ -368,7 +1070,7 @@ class VoltageControlEnv(gym.Env):
 
         # Repeat the generator indices in the first column of the
         # action_array.
-        self.action_array[:, 0] = np.tile(self.gen_data.index.to_numpy(),
+        self.action_array[:, 0] = np.tile(self.gen_init_data.index.to_numpy(),
                                           num_gen_voltage_bins)
 
         # Create indices into self.gen_bins in the second column.
@@ -401,130 +1103,13 @@ class VoltageControlEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=0, high=1, shape=(self.num_obs,), dtype=self.dtype)
 
-        # Initialize attributes for holding our most recent observation
-        # data. These will be set in _rotate_and_get_observation_frames.
-        self.gen_obs: Union[pd.DataFrame, None] = None
-        self.load_obs: Union[pd.DataFrame, None] = None
-        self.bus_obs: Union[pd.DataFrame, None] = None
-        self.gen_obs_prev: Union[pd.DataFrame, None] = None
-        self.load_obs_prev: Union[pd.DataFrame, None] = None
-        self.bus_obs_prev: Union[pd.DataFrame, None] = None
-
-        # Initialize attribute for checking if all voltages are in
-        # range. This will be used to check if an episode is done, and
-        # will be reset in the "reset" method.
-        self.all_v_in_range = False
-
-        # We'll track how many actions the agent has taken in an episode
-        # as part of the stopping criteria.
-        self.action_count = 0
-
-        ################################################################
-        # Set rewards.
-        ################################################################
-        if rewards is None:
-            # If not given rewards, use the default.
-            self.rewards = self.REWARDS
-        else:
-            # Start by simply copying REWARDS.
-            self.rewards = deepcopy(self.REWARDS)
-
-            # If given rewards, loop over the dictionary and set fields.
-            for key, value in rewards.items():
-                # Raise exception if key is invalid.
-                if key not in self.REWARDS:
-                    raise KeyError(
-                        f'The given rewards key, {key}, is invalid. Please '
-                        'only use keys in the class constant, REWARDS.')
-
-                # If we're here, the key is valid. Set it.
-                self.rewards[key] = value
-
-        ################################################################
-        # Solve power flow, save state.
-        ################################################################
-        # Solve the initial power flow, and save the state for later
-        # loading. This is done so that PowerWorld doesn't get stuck
-        # in a low voltage solution when moving from a bad case to a
-        # feasible case.
-        #
-        # Ensure this is the absolute LAST thing done
-        # in __init__ so that changes we've made to the case don't get
-        # overridden.
-        self.saw.SolvePowerFlow()
-        self.saw.SaveState()
-
         # All done.
 
-    # def seed(self, seed=None):
-    #     """Borrowed from Gym.
-    #     https://github.com/openai/gym/blob/master/gym/envs/toy_text/blackjack.py
-    #     """
-    #     self.np_random, seed = seeding.np_random(seed)
-    #     return [seed]
-
-    def _zero_negative_gen_mw_limits(self):
-        """Helper to zero out generator MW limits which are < 0."""
-        gen_less_0 = self.gen_data['GenMWMin'] < 0
-        if (self.gen_data['GenMWMin'] < 0).any():
-            self.gen_data.loc[gen_less_0, 'GenMWMin'] = 0.0
-            self.saw.change_and_confirm_params_multiple_element(
-                'gen', self.gen_data.loc[:, self.gen_key_fields
-                                         + ['GenMWMin']])
-            self.log.warning(f'{gen_less_0.sum()} generators with '
-                             'GenMWMin < 0 have had GenMWMin set to 0.')
-
-    def _zero_i_z_loads(self):
-        """Helper to zero out constant current and constant impedance
-        portions of loads.
-        """
-        # Warn if we have constant current or constant impedance load
-        # values. Then, zero out the constant current and constant
-        # impedance portions.
-        if (self.load_data[LOAD_I_Z] != 0.0).any().any():
-            self.log.warning('The given PowerWorld case has loads with '
-                             'non-zero constant current and constant impedance'
-                             ' portions. These will be zeroed out.')
-            self.load_data.loc[:, LOAD_I_Z] = 0.0
-            self.saw.change_and_confirm_params_multiple_element(
-                'Load', self.load_data.loc[:, self.load_key_fields + LOAD_I_Z])
-
-    def _check_max_load(self, max_load_factor):
-        """Ensure maximum loading is less than generation capacity. Also
-        warn if generation capacity is >= 2 * maximum loading.
-        """
-        if self.max_load_mw > self.gen_mw_capacity:
-            # TODO: Better exception.
-            raise UserWarning(
-                f'The given max_load_factor, {max_load_factor:.3f} '
-                f'resulted in maximum loading of {self.max_load_mw:.3f} MW'
-                ', but the generator active power capacity is only '
-                f'{self.gen_mw_capacity:.3f} MW. Reduce the '
-                'max_load_factor and try again.')
-
-        # Warn if our generation capacity is more than double the max
-        # load - this could mean generator maxes aren't realistic.
-        gen_factor = self.gen_mw_capacity / self.max_load_mw
-        if gen_factor >= 1.5:
-            self.log.warning(
-                f'The given generator capacity, {self.gen_mw_capacity:.2f} MW,'
-                f' is {gen_factor:.2f} times larger than the maximum load, '
-                f'{self.max_load_mw:.2f} MW. This could indicate that '
-                'the case does not have proper generator limits set up.')
-
-    def _check_min_load(self, min_load_factor):
-        """Ensure minimum loading is greater than the minimum generator
-        minimum generation.
-        """
-        min_gen = self.gen_data['GenMWMin'].min()
-        if self.min_load_mw < min_gen:
-            # TODO: better exception.
-            raise UserWarning(
-                f'The given min_load_factor, {min_load_factor:.3f}, '
-                'results in a minimum system loading of '
-                f'{self.min_load_mw:3f} MW, but the lowest generation '
-                f'possible is {min_gen:.3f} MW. Increase the '
-                'min_load_factor and try again.')
+    def render(self, mode='human'):
+        """Putting this here strictly to get PyCharm to quit
+        complaining about unimplemented abstract methods. I don't want
+        to completely suppress the warning, though."""
+        raise NotImplementedError
 
     def _compute_loading(self, load_on_probability,
                          min_load_pf, lead_pf_probability):
@@ -626,8 +1211,9 @@ class VoltageControlEnv(gym.Env):
                     # and the minimum of the generator's maximum and
                     # load.
                     gen_mw = self.rng.uniform(
-                        self.gen_data.iloc[gen_idx]['GenMWMin'],
-                        min(self.gen_data.iloc[gen_idx]['GenMWMax'], load))
+                        self.gen_init_data.iloc[gen_idx]['GenMWMin'],
+                        min(self.gen_init_data.iloc[gen_idx]['GenMWMax'],
+                            load))
 
                     # Place the generation in the appropriate spot.
                     if (gen_mw + gen_total) > load:
@@ -656,99 +1242,6 @@ class VoltageControlEnv(gym.Env):
 
         return scenario_gen_mw
 
-    def render(self, mode='human'):
-        """Not planning to implement this for now. However, it could
-        make for some nice graphics/presentations related to learning.
-
-        Also, PowerWorld does have the option to show the one line, so
-        this could be interesting down the line.
-        """
-        raise NotImplementedError
-
-    def reset(self):
-        """Advance to the next episode/scenario. To do so, generators
-        will be turned on/off, generator MW set points will be set,
-        and load P/Q will be set. Finally, the power flow will be
-        solved and an initial observation will be returned.
-        """
-        # Reset the action counter.
-        self.action_count = 0
-
-        # Reset all_v_in_range.
-        self.all_v_in_range = False
-
-        done = False
-
-        while (not done) & (self.scenario_idx < self.num_scenarios):
-            # Load the initial state of the system to avoid getting
-            # stuck in a low voltage solution from a previous solve.
-            self.saw.LoadState()
-
-            # Get generators and loads set up for this scenario.
-            self._set_gens_for_scenario()
-            self._set_loads_for_scenario()
-
-            # Solve the power flow.
-            try:
-                obs = self._solve_and_observe()
-            except (PowerWorldError, LowVoltageError) as exc:
-                # This scenario is bad. Move on.
-                self.log.debug(
-                    f'Scenario {self.scenario_idx} failed. Error message: '
-                    f'{exc.args[0]}')
-            else:
-                # Success! The power flow solved, and no voltages went
-                # below the minimum. Signify we're done looping.
-                done = True
-            finally:
-                # Always increment the scenario index.
-                self.scenario_idx += 1
-
-        # Raise exception if we've gone through all the scenarios.
-        # TODO: better exception.
-        if self.scenario_idx >= self.num_scenarios:
-            raise UserWarning('We have gone through all scenarios.')
-
-        # Return the observation.
-        # noinspection PyUnboundLocalVariable
-        return obs
-
-    def step(self, action):
-        """Change generator set point, solve power flow, compute reward.
-        """
-        # Bump the action counter.
-        self.action_count += 1
-
-        # Take the action.
-        self._take_action(action)
-
-        # Solve the power flow and get an observation.
-        try:
-            obs = self._solve_and_observe()
-        except (PowerWorldError, LowVoltageError):
-            # The power flow failed to solve or bus voltages went below
-            # the minimum. This episode is complete.
-            # TODO: Should our observation be None?
-            obs = None
-            done = True
-            # An action was taken, so include both the action and
-            # failure penalties.
-            reward = self.rewards['fail'] + self.rewards['action']
-        else:
-            # The power flow successfully solved. Compute the reward
-            # and check to see if this episode is done.
-            reward = self._compute_reward()
-            done = self._check_done()
-
-        # TODO: update the fourth return (info) to, you know, actually
-        #   give info.
-        # That's it.
-        return obs, reward, done, dict()
-
-    def close(self):
-        """Tear down SimAuto wrapper."""
-        self.saw.exit()
-
     def _take_action(self, action):
         """Helper to make the appropriate updates in PowerWorld for a
         given action.
@@ -760,133 +1253,42 @@ class VoltageControlEnv(gym.Env):
         voltage = self.gen_bins[self.action_array[action, 1]]
         self.saw.ChangeParametersSingleElement(
             ObjectType='gen', ParamList=self.gen_key_fields + ['GenVoltSet'],
-            Values=self.gen_data.loc[gen_idx, self.gen_key_fields].tolist()
+            Values=self.gen_init_data.loc[gen_idx,
+                                          self.gen_key_fields].tolist()
             + [voltage]
         )
-
-    def _solve_and_observe(self):
-        """Helper to solve the power flow and get an observation.
-
-        :raises LowVoltageError: If any bus voltage is below MIN_V after
-            solving the power flow.
-        :raises PowerWorldError: If PowerWorld fails to solve the power
-            flow.
-        """
-        # Start by solving the power flow. This will raise a
-        # PowerWorldError if it fails to solve.
-        self.saw.SolvePowerFlow()
-
-        # Get new observations, rotate old ones.
-        self._rotate_and_get_observation_frames()
-
-        # Check if all voltages are in range.
-        self.all_v_in_range = (
-                ((self.bus_obs['BusPUVolt'] < LOW_V)
-                 & (self.bus_obs['BusPUVolt'] > HIGH_V)).sum()
-                == 0
-        )
-
-        # If any voltages are too low, raise exception.
-        if (self.bus_obs['BusPUVolt'] < MIN_V).any():
-            num_low = (self.bus_obs['BusPUVolt'] < MIN_V).sum()
-            raise LowVoltageError(
-                f'{num_low} buses were below {MIN_V:.2f} p.u.'
-            )
-
-        # Get and return a properly arranged observation.
-        return self._get_observation()
-
-    def _set_gens_for_scenario(self):
-        """Helper to set up generators in the case for this
-        episode/scenario. This method should only be called by reset.
-        """
-        # Extract a subset of the generator data.
-        gens = self.gen_data.loc[:, self.gen_key_fields
-                                 + self.GEN_RESET_FIELDS]
-
-        # Turn generators on/off and set their MW set points.
-        gens.loc[:, 'GenMW'] = self.gen_mw[self.scenario_idx, :]
-        gen_g_0 = self.gen_mw[self.scenario_idx, :] > 0
-        gens.loc[gen_g_0, 'GenStatus'] = 'Closed'
-        gens.loc[~gen_g_0, 'GenStatus'] = 'Open'
-        # TODO: may want to use a faster command like
-        #   ChangeParametersMultipleElement. NOTE: Will need to
-        #   update patching in tests if this route is taken.
-        self.saw.change_and_confirm_params_multiple_element('gen', gens)
-
-    def _set_loads_for_scenario(self):
-        """Helper to set up loads in the case for this episode/scenario.
-        This method should only be called by reset.
-        """
-        # Extract a subset of the load data.
-        loads = self.load_data.loc[:, self.load_key_fields
-                                   + self.LOAD_RESET_FIELDS]
-
-        # Set P and Q.
-        loads.loc[:, 'LoadSMW'] = self.loads_mw[self.scenario_idx, :]
-        loads.loc[:, 'LoadSMVR'] = self.loads_mvar[self.scenario_idx, :]
-        # TODO: may want to use a faster command like
-        #   ChangeParametersMultipleElement. NOTE: Will need to
-        #   update patching in tests if this route is taken.
-        self.saw.change_and_confirm_params_multiple_element('load', loads)
 
     def _get_observation(self) -> np.ndarray:
         """Helper to return an observation. For the given simulation,
         the power flow should already have been solved.
         """
         # Add a column to load_data for power factor lead/lag
-        self.load_obs['lead'] = \
-            (self.load_obs['LoadSMVR'] < 0).astype(self.dtype)
+        self.load_obs_data['lead'] = \
+            (self.load_obs_data['LoadSMVR'] < 0).astype(self.dtype)
 
         # Create observation by concatenating the relevant data. No
         # need to scale per unit data.
         return np.concatenate([
             # Bus voltages.
-            self.bus_obs['BusPUVolt'].to_numpy(dtype=self.dtype),
+            self.bus_obs_data['BusPUVolt'].to_numpy(dtype=self.dtype),
             # TODO: Bus voltage angles?
             # Generator active power divide by maximum active power.
-            (self.gen_obs['GenMW'] / self.gen_obs['GenMWMax']).to_numpy(
-                dtype=self.dtype),
+            (self.gen_obs_data['GenMW']
+             / self.gen_obs_data['GenMWMax']).to_numpy(dtype=self.dtype),
             # Generator power factor.
-            (self.gen_obs['GenMW'] / self.gen_obs['GenMVA']).fillna(
+            (self.gen_obs_data['GenMW'] / self.gen_obs_data['GenMVA']).fillna(
                 1).to_numpy(dtype=self.dtype),
             # Generator var loading.
-            self.gen_obs['GenMVRPercent'].to_numpy(dtype=self.dtype) / 100,
+            self.gen_obs_data['GenMVRPercent'].to_numpy(
+                dtype=self.dtype) / 100,
             # Load MW consumption divided by maximum MW loading.
-            (self.load_obs['LoadSMW'] / self.max_load_mw).to_numpy(
+            (self.load_obs_data['LoadSMW'] / self.max_load_mw).to_numpy(
                 dtype=self.dtype),
             # Load power factor.
-            self.load_obs['PowerFactor'].to_numpy(dtype=self.dtype),
+            self.load_obs_data['PowerFactor'].to_numpy(dtype=self.dtype),
             # Flag for leading power factors.
-            self.load_obs['lead'].to_numpy(dtype=self.dtype)
+            self.load_obs_data['lead'].to_numpy(dtype=self.dtype)
         ])
-
-    def _rotate_and_get_observation_frames(self):
-        """Simple helper to get new observation DataFrames, and rotate
-        the previous frames into the correct attributes.
-        """
-        # Rotate.
-        self.bus_obs_prev = self.bus_obs
-        self.gen_obs_prev = self.gen_obs
-        self.load_obs_prev = self.load_obs
-
-        # Get new data.
-        # Buses:
-        if self.bus_obs_fields is not None:
-            self.bus_obs = self.saw.GetParametersMultipleElement(
-                ObjectType='bus', ParamList=self.bus_obs_fields)
-        # Generators:
-        if self.gen_obs_fields is not None:
-            self.gen_obs = self.saw.GetParametersMultipleElement(
-                ObjectType='gen', ParamList=self.gen_obs_fields)
-        # Loads:
-        if self.load_obs_fields is not None:
-            self.load_obs = self.saw.GetParametersMultipleElement(
-                ObjectType='load', ParamList=self.load_obs_fields
-            )
-
-        # That's it.
-        return None
 
     def _compute_reward(self):
         """Helper to compute a reward after an action. This method
@@ -903,16 +1305,16 @@ class VoltageControlEnv(gym.Env):
         # reducing the distance to nominal, while a negative value
         # indicates increasing the distance to nominal.
         nom_delta_diff = \
-            ((self.bus_obs_prev['BusPUVolt'] - NOMINAL_V).abs()
-             - (self.bus_obs['BusPUVolt'] - NOMINAL_V).abs()) * 100
+            ((self.bus_obs_data_prev['BusPUVolt'] - NOMINAL_V).abs()
+             - (self.bus_obs_data['BusPUVolt'] - NOMINAL_V).abs()) * 100
 
         # Get masks for bus voltages which are too high or too low for
         # both the previous (pre-action) data frame and the current
         # (post-action) data frame.
-        low_v_prev = self.bus_obs_prev['BusPUVolt'] < LOW_V
-        high_v_prev = self.bus_obs_prev['BusPUVolt'] > HIGH_V
-        low_v_now = self.bus_obs['BusPUVolt'] < LOW_V
-        high_v_now = self.bus_obs['BusPUVolt'] > HIGH_V
+        low_v_prev = self.bus_obs_data_prev['BusPUVolt'] < LOW_V
+        high_v_prev = self.bus_obs_data_prev['BusPUVolt'] > HIGH_V
+        low_v_now = self.bus_obs_data['BusPUVolt'] < LOW_V
+        high_v_now = self.bus_obs_data['BusPUVolt'] > HIGH_V
 
         # Get masks for voltages.
         in_prev = ~low_v_prev & ~high_v_prev  # in bounds before
@@ -936,10 +1338,10 @@ class VoltageControlEnv(gym.Env):
         # Give penalty for voltages that were in bounds, but moved out
         # of bounds. Penalty should be based on how far away from the
         # boundary (upper or lower) that they moved.
-        reward += ((self.bus_obs['BusPUVolt'][in_out_low] - LOW_V) / 0.01
+        reward += ((self.bus_obs_data['BusPUVolt'][in_out_low] - LOW_V) / 0.01
                    * self.rewards['v_delta']).sum()
-        reward += ((HIGH_V - self.bus_obs['BusPUVolt'][in_out_high]) / 0.01
-                   * self.rewards['v_delta']).sum()
+        reward += ((HIGH_V - self.bus_obs_data['BusPUVolt'][in_out_high])
+                   / 0.01 * self.rewards['v_delta']).sum()
 
         # Give an extra penalty for moving buses out of bounds.
         reward += in_out.sum() * self.rewards['v_out_bounds']
@@ -957,33 +1359,17 @@ class VoltageControlEnv(gym.Env):
         # and a negative reward for increasing it.
         # TODO: This really should account for actual vars not just
         #   percent loading.
-        var_delta = (self.gen_obs_prev['GenMVRPercent']
-                     - self.gen_obs['GenMVRPercent'])
+        var_delta = (self.gen_obs_data_prev['GenMVRPercent']
+                     - self.gen_obs_data['GenMVRPercent'])
 
         reward += (var_delta * self.rewards['gen_var_delta']).sum()
 
         # All done.
         return reward
 
-    def _check_done(self):
-        """Check whether (True) or not (False) and episode is done. Call
-        this after calling _solve_and_observe.
-        """
-        # If the number of actions taken in this episode has exceeded
-        # a threshold, we're done.
-        # TODO: Stop hard-coding number of actions
-        if self.action_count > (self.num_gens * 2):
-            return True
 
-        # If all voltages are in range, we're done.
-        if self.all_v_in_range:
-            return True
-
-        # Otherwise, we're not done.
-        return False
-
-
-class GridMindEnv(VoltageControlEnv):
+# noinspection PyAbstractClass
+class GridMindEnv(DiscreteVoltageControlEnvBase):
     """Environment for attempting to replicate the work done by the
     State Grid Corporation of China, described in the following paper:
 

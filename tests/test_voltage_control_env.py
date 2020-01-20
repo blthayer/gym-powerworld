@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 from gym_powerworld.envs import voltage_control_env
-from gym_powerworld.envs.voltage_control_env import LOSS, MIN_V
+from gym_powerworld.envs.voltage_control_env import LOSS
 import os
 import pandas as pd
 import numpy as np
@@ -28,7 +28,7 @@ LOAD_MW_14 = 259.0
 
 
 # noinspection DuplicatedCode
-class VoltageControlEnv14BusTestCase(unittest.TestCase):
+class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
     """Test initializing the environment with the 14 bus model."""
     @classmethod
     def setUpClass(cls) -> None:
@@ -48,7 +48,7 @@ class VoltageControlEnv14BusTestCase(unittest.TestCase):
         cls.log_level = logging.INFO
         cls.dtype = np.float32
 
-        cls.env = voltage_control_env.VoltageControlEnv(
+        cls.env = voltage_control_env.DiscreteVoltageControlEnv(
             pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
             max_load_factor=cls.max_load_factor,
             min_load_factor=cls.min_load_factor,
@@ -85,18 +85,19 @@ class VoltageControlEnv14BusTestCase(unittest.TestCase):
         """Ensure the gen key fields are correct. Hard coding style."""
         self.assertListEqual(['BusNum', 'GenID'], self.env.gen_key_fields)
 
-    def test_gen_fields(self):
-        self.assertListEqual(self.env.gen_key_fields + self.env.GEN_FIELDS,
-                             self.env.gen_fields)
+    def test_gen_init_fields(self):
+        self.assertListEqual(
+            self.env.gen_key_fields + self.env.GEN_INIT_FIELDS,
+            self.env.gen_init_fields)
 
     def test_gen_obs_fields(self):
         self.assertListEqual(self.env.gen_key_fields + self.env.GEN_OBS_FIELDS,
                              self.env.gen_obs_fields)
 
-    def test_gen_data(self):
-        self.assertIsInstance(self.env.gen_data, pd.DataFrame)
-        self.assertListEqual(self.env.gen_fields,
-                             self.env.gen_data.columns.tolist())
+    def test_gen_init_data(self):
+        self.assertIsInstance(self.env.gen_init_data, pd.DataFrame)
+        self.assertListEqual(self.env.gen_init_fields,
+                             self.env.gen_init_data.columns.tolist())
 
     def test_num_gens(self):
         # 15 bus case has 5 generators.
@@ -107,14 +108,14 @@ class VoltageControlEnv14BusTestCase(unittest.TestCase):
         intended.
         """
         # First, ensure it has been called.
-        self.assertTrue((self.env.gen_data['GenMWMin'] >= 0).all())
+        self.assertTrue((self.env.gen_init_data['GenMWMin'] >= 0).all())
 
-        # Now, patch gen_data and saw and call the function.
-        gen_copy = self.env.gen_data.copy(deep=True)
+        # Now, patch gen_init_data and saw and call the function.
+        gen_copy = self.env.gen_init_data.copy(deep=True)
         gen_copy['GenMWMin'] = -10
         # I wanted to use self.assertLogs, but that has trouble working
         # with nested context managers...
-        with patch.object(self.env, 'gen_data', new=gen_copy):
+        with patch.object(self.env, 'gen_init_data', new=gen_copy):
             with patch.object(self.env, 'saw') as p:
                 self.env._zero_negative_gen_mw_limits()
 
@@ -152,30 +153,31 @@ class VoltageControlEnv14BusTestCase(unittest.TestCase):
         # Hard coding!
         self.assertListEqual(self.env.load_key_fields, ['BusNum', 'LoadID'])
 
-    def test_load_fields(self):
-        self.assertListEqual(self.env.load_fields,
-                             self.env.load_key_fields + self.env.LOAD_FIELDS)
+    def test_load_init_fields(self):
+        self.assertListEqual(self.env.load_init_fields,
+                             self.env.load_key_fields
+                             + self.env.LOAD_INIT_FIELDS)
 
     def test_load_obs_fields(self):
         self.assertListEqual(
             self.env.load_obs_fields,
             self.env.load_key_fields + self.env.LOAD_OBS_FIELDS)
 
-    def test_load_data(self):
-        self.assertIsInstance(self.env.load_data, pd.DataFrame)
-        self.assertListEqual(self.env.load_data.columns.tolist(),
-                             self.env.load_fields)
+    def test_load_init_data(self):
+        self.assertIsInstance(self.env.load_init_data, pd.DataFrame)
+        self.assertListEqual(self.env.load_init_data.columns.tolist(),
+                             self.env.load_init_fields)
 
     def test_num_loads(self):
         self.assertEqual(11, self.env.num_loads)
 
     def test_zero_i_z_loads(self):
-        """Patch the environment's load_data and ensure the method is
+        """Patch the environment's load_init_data and ensure the method is
         working properly.
         """
-        data = self.env.load_data.copy(deep=True)
+        data = self.env.load_init_data.copy(deep=True)
         data[voltage_control_env.LOAD_I_Z] = 1
-        with patch.object(self.env, 'load_data', new=data):
+        with patch.object(self.env, 'load_init_data', new=data):
             with patch.object(self.env, 'saw') as p:
                 self.env._zero_i_z_loads()
 
@@ -189,10 +191,10 @@ class VoltageControlEnv14BusTestCase(unittest.TestCase):
         self.assertListEqual(self.env.bus_key_fields + self.env.BUS_OBS_FIELDS,
                              self.env.bus_obs_fields)
 
-    def test_bus_data(self):
-        self.assertIsInstance(self.env.bus_data, pd.DataFrame)
-        self.assertListEqual(self.env.bus_fields,
-                             self.env.bus_data.columns.tolist())
+    def test_bus_init_data(self):
+        self.assertIsInstance(self.env.bus_init_data, pd.DataFrame)
+        self.assertListEqual(self.env.bus_init_fields,
+                             self.env.bus_init_data.columns.tolist())
 
     def test_num_buses(self):
         self.assertEqual(14, self.env.num_buses)
@@ -227,11 +229,11 @@ class VoltageControlEnv14BusTestCase(unittest.TestCase):
 
     def test_check_min_load(self):
         # Get generator data.
-        gens = self.env.gen_data.copy(deep=True)
+        gens = self.env.gen_init_data.copy(deep=True)
         # Increase all minimum generation.
         gens['GenMWMin'] = 10
         # Patch:
-        with patch.object(self.env, 'gen_data', gens):
+        with patch.object(self.env, 'gen_init_data', gens):
             with patch.object(self.env, 'min_load_mw', 9.9):
                 with self.assertRaisesRegex(UserWarning, 'The given min_load'):
                     self.env._check_min_load(2)
@@ -321,7 +323,7 @@ class VoltageControlEnv14BusTestCase(unittest.TestCase):
         #   e.g. the Texas 2000 bus case, we need to test that.
         #
         # # Ensure generator outputs are within bounds.
-        # for gen_idx, row in enumerate(env.gen_data.itertuples()):
+        # for gen_idx, row in enumerate(env.gen_init_data.itertuples()):
         #     gen_output = env.gen_mw[:, gen_idx]
         #     # noinspection PyUnresolvedReferences
         #     self.assertTrue((gen_output <= row.GenMWMax).all())
@@ -348,7 +350,7 @@ class VoltageControlEnv14BusTestCase(unittest.TestCase):
         a = np.zeros(shape=(self.env.action_space.n, 2), dtype=int)
         # Put generator indices in column 0.
         a[:, 0] = np.array(
-            self.env.gen_data.index.tolist() * self.num_gen_voltage_bins)
+            self.env.gen_init_data.index.tolist() * self.num_gen_voltage_bins)
 
         # Write a crappy, simple, loop to put the indices of the
         # generator voltage levels in.
@@ -382,13 +384,13 @@ class VoltageControlEnv14BusTestCase(unittest.TestCase):
         """After initialization, several observation related attributes
         should be initialized to None.
         """
-        self.assertIsNone(self.env.gen_obs)
-        self.assertIsNone(self.env.load_obs)
-        self.assertIsNone(self.env.bus_obs)
+        self.assertIsNone(self.env.gen_obs_data)
+        self.assertIsNone(self.env.load_obs_data)
+        self.assertIsNone(self.env.bus_obs_data)
 
-        self.assertIsNone(self.env.gen_obs_prev)
-        self.assertIsNone(self.env.load_obs_prev)
-        self.assertIsNone(self.env.bus_obs_prev)
+        self.assertIsNone(self.env.gen_obs_data_prev)
+        self.assertIsNone(self.env.load_obs_data_prev)
+        self.assertIsNone(self.env.bus_obs_data_prev)
 
     def test_action_count(self):
         """After initialization, the action count should be 0."""
@@ -405,7 +407,7 @@ class VoltageControlEnv14BusTestCase(unittest.TestCase):
         expected.
         """
         # Create a new env, but use new rewards.
-        env = voltage_control_env.VoltageControlEnv(
+        env = voltage_control_env.DiscreteVoltageControlEnv(
             pwb_path=PWB_14, num_scenarios=10,
             max_load_factor=self.max_load_factor,
             min_load_factor=self.min_load_factor,
@@ -426,7 +428,7 @@ class VoltageControlEnv14BusTestCase(unittest.TestCase):
         """Ensure an exception is raised if a bad reward key is given.
         """
         with self.assertRaisesRegex(KeyError, 'The given rewards key, v_detl'):
-            env = voltage_control_env.VoltageControlEnv(
+            _ = voltage_control_env.DiscreteVoltageControlEnv(
                 pwb_path=PWB_14, num_scenarios=10,
                 max_load_factor=self.max_load_factor,
                 min_load_factor=self.min_load_factor,
@@ -434,7 +436,7 @@ class VoltageControlEnv14BusTestCase(unittest.TestCase):
 
 
 # noinspection DuplicatedCode
-class VoltageControlEnv14BusResetTestCase(unittest.TestCase):
+class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
     """Test the reset method of the environment."""
     @classmethod
     def setUpClass(cls) -> None:
@@ -454,7 +456,7 @@ class VoltageControlEnv14BusResetTestCase(unittest.TestCase):
         cls.log_level = logging.INFO
         cls.dtype = np.float32
 
-        cls.env = voltage_control_env.VoltageControlEnv(
+        cls.env = voltage_control_env.DiscreteVoltageControlEnv(
             pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
             max_load_factor=cls.max_load_factor,
             min_load_factor=cls.min_load_factor,
@@ -576,39 +578,39 @@ class VoltageControlEnv14BusResetTestCase(unittest.TestCase):
 
         # Pull the generator data from PowerWorld and ensure that both
         # the status and output match up.
-        gen_data = self.env.saw.GetParametersMultipleElement(
+        gen_init_data = self.env.saw.GetParametersMultipleElement(
             ObjectType='gen',
             ParamList=self.env.gen_key_fields + self.env.GEN_RESET_FIELDS)
 
         # All gens except for the 2nd should be closed.
         status = ['Closed'] * 5
         status[1] = 'Open'
-        self.assertListEqual(status, gen_data['GenStatus'].tolist())
+        self.assertListEqual(status, gen_init_data['GenStatus'].tolist())
 
         # Excluding the slack, generator MW output should exactly match
         # what was commanded.
         np.testing.assert_allclose(
-            gen_mw_row[1:], gen_data['GenMW'].to_numpy()[1:])
+            gen_mw_row[1:], gen_init_data['GenMW'].to_numpy()[1:])
 
         # The slack should be equal to within our assumed line losses.
         np.testing.assert_allclose(
-            gen_mw_row[0], gen_data['GenMW'].to_numpy()[0],
+            gen_mw_row[0], gen_init_data['GenMW'].to_numpy()[0],
             rtol=LOSS, atol=0
         )
 
         # Pull the load data from PowerWorld and ensure that both the
         # MW and MVAR outputs match up.
-        load_data = self.env.saw.GetParametersMultipleElement(
+        load_init_data = self.env.saw.GetParametersMultipleElement(
             ObjectType='load',
             ParamList=self.env.load_key_fields + self.env.LOAD_RESET_FIELDS
         )
 
         np.testing.assert_allclose(
-            loads_mw_row, load_data['LoadSMW'].to_numpy()
+            loads_mw_row, load_init_data['LoadSMW'].to_numpy()
         )
 
         np.testing.assert_allclose(
-            loads_mvar_row, load_data['LoadSMVR'].to_numpy()
+            loads_mvar_row, load_init_data['LoadSMVR'].to_numpy()
         )
 
     def test_failed_power_flow(self):
@@ -637,7 +639,7 @@ class VoltageControlEnv14BusResetTestCase(unittest.TestCase):
         self.assertEqual(0, self.env.scenario_idx)
 
         # Having trouble getting some good patching going in order to
-        # get _get_observation to set the bus_obs differently for each
+        # get _get_observation to set the bus_obs_data differently for each
         # run. So, I'm going to do this the "bad" way and set up the
         # first scenario such that all generators are off (the power
         # flow will solve, but all buses have 0 pu voltage),
@@ -690,7 +692,7 @@ class VoltageControlEnv14BusResetTestCase(unittest.TestCase):
 
 
 # noinspection DuplicatedCode
-class VoltageControlEnv14BusStepTestCase(unittest.TestCase):
+class DiscreteVoltageControlEnv14BusStepTestCase(unittest.TestCase):
     """Test the step method of the environment."""
     @classmethod
     def setUpClass(cls) -> None:
@@ -710,7 +712,7 @@ class VoltageControlEnv14BusStepTestCase(unittest.TestCase):
         cls.log_level = logging.INFO
         cls.dtype = np.float32
 
-        cls.env = voltage_control_env.VoltageControlEnv(
+        cls.env = voltage_control_env.DiscreteVoltageControlEnv(
             pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
             max_load_factor=cls.max_load_factor,
             min_load_factor=cls.min_load_factor,
@@ -741,12 +743,12 @@ class VoltageControlEnv14BusStepTestCase(unittest.TestCase):
         self.env.step(action)
 
         # Hard-code access to the 0th generator. It's at bus 1.
-        gen_data = self.env.saw.GetParametersSingleElement(
+        gen_init_data = self.env.saw.GetParametersSingleElement(
             ObjectType='gen', ParamList=['BusNum', 'GenID', 'GenVoltSet'],
             Values=[gen_bus, '1', 0]
         )
 
-        self.assertAlmostEqual(v_set, gen_data['GenVoltSet'], places=3)
+        self.assertAlmostEqual(v_set, gen_init_data['GenVoltSet'], places=3)
 
     def test_action_0(self):
         """Action 0 should set the 0th generator to the minimum."""
@@ -796,7 +798,7 @@ class VoltageControlEnv14BusStepTestCase(unittest.TestCase):
 
 
 # noinspection DuplicatedCode
-class VoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
+class DiscreteVoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
     """Test the _compute_reward method of the environment."""
     @classmethod
     def setUpClass(cls) -> None:
@@ -825,7 +827,7 @@ class VoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
             "fail": -1000
         }
 
-        cls.env = voltage_control_env.VoltageControlEnv(
+        cls.env = voltage_control_env.DiscreteVoltageControlEnv(
             pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
             max_load_factor=cls.max_load_factor,
             min_load_factor=cls.min_load_factor,
@@ -853,16 +855,16 @@ class VoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
             [[1., 'a'], [1., 'b'], [1., 'c'], [1., 'd'], [1., 'e'], [1., 'f']],
             columns=['BusPUVolt', 'junk'])
 
-        self.env.bus_obs_prev = v_df.copy()
-        self.env.bus_obs = v_df.copy()
+        self.env.bus_obs_data_prev = v_df.copy()
+        self.env.bus_obs_data = v_df.copy()
 
         # 6 gens at 80% var loading.
         var_df = pd.DataFrame(
             [[.8, 'a'], [.8, 'b'], [.8, 'c'], [.8, 'd'], [.8, 'e'], [.8, 'f']],
             columns=['GenMVRPercent', 'junk'])
 
-        self.env.gen_obs_prev = var_df.copy()
-        self.env.gen_obs = var_df.copy()
+        self.env.gen_obs_data_prev = var_df.copy()
+        self.env.gen_obs_data = var_df.copy()
 
     def get_reward_no_action(self):
         """Helper to compute the reward but temporarily zero out the
@@ -880,8 +882,8 @@ class VoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
     def test_low_voltage_moved_up(self):
         """Test a single low bus voltage moving up, but not in bounds.
         """
-        self.env.bus_obs_prev.loc[2, 'BusPUVolt'] = 0.8
-        self.env.bus_obs.loc[2, 'BusPUVolt'] = 0.85
+        self.env.bus_obs_data_prev.loc[2, 'BusPUVolt'] = 0.8
+        self.env.bus_obs_data.loc[2, 'BusPUVolt'] = 0.85
 
         # The bus voltage moved up 5 1/100ths per unit.
         self.assertAlmostEqual(self.get_reward_no_action(),
@@ -890,8 +892,8 @@ class VoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
     def test_high_voltage_moved_down(self):
         """Test a single high bus voltage moving down, but not in bounds.
         """
-        self.env.bus_obs_prev.loc[0, 'BusPUVolt'] = 1.1
-        self.env.bus_obs.loc[0, 'BusPUVolt'] = 1.07
+        self.env.bus_obs_data_prev.loc[0, 'BusPUVolt'] = 1.1
+        self.env.bus_obs_data.loc[0, 'BusPUVolt'] = 1.07
 
         # The bus voltage moved down 3 1/100ths per unit.
         self.assertAlmostEqual(self.get_reward_no_action(),
@@ -901,8 +903,8 @@ class VoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
         """Test a single low bus voltage moving up and exceeding nominal
         voltage.
         """
-        self.env.bus_obs_prev.loc[2, 'BusPUVolt'] = 0.93
-        self.env.bus_obs.loc[2, 'BusPUVolt'] = 1.02
+        self.env.bus_obs_data_prev.loc[2, 'BusPUVolt'] = 0.93
+        self.env.bus_obs_data.loc[2, 'BusPUVolt'] = 1.02
 
         # The bus voltage should get credit for reducing its distance to
         # nominal, as well as a bonus for moving into the good band.
@@ -915,8 +917,8 @@ class VoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
         """Test a single high bus voltage moving down and going below
         nominal voltage.
         """
-        self.env.bus_obs_prev.loc[5, 'BusPUVolt'] = 1.1
-        self.env.bus_obs.loc[5, 'BusPUVolt'] = 0.98
+        self.env.bus_obs_data_prev.loc[5, 'BusPUVolt'] = 1.1
+        self.env.bus_obs_data.loc[5, 'BusPUVolt'] = 0.98
 
         # The bus voltage should get credit for moving to nominal, and
         # also get a bonus for moving into the good band.
@@ -927,8 +929,8 @@ class VoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
 
     def test_low_voltage_moved_in_range(self):
         """Should also get a bonus for moving a voltage in bounds."""
-        self.env.bus_obs_prev.loc[1, 'BusPUVolt'] = 0.91
-        self.env.bus_obs.loc[1, 'BusPUVolt'] = 0.95
+        self.env.bus_obs_data_prev.loc[1, 'BusPUVolt'] = 0.91
+        self.env.bus_obs_data.loc[1, 'BusPUVolt'] = 0.95
 
         # The bus voltage moved up 4 1/100ths per unit, and also moved
         # into the "good" range.
@@ -938,8 +940,8 @@ class VoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
 
     def test_high_voltage_moved_in_range(self):
         """Should also get a bonus for moving a voltage in bounds."""
-        self.env.bus_obs_prev.loc[3, 'BusPUVolt'] = 1.2
-        self.env.bus_obs.loc[3, 'BusPUVolt'] = 1.05
+        self.env.bus_obs_data_prev.loc[3, 'BusPUVolt'] = 1.2
+        self.env.bus_obs_data.loc[3, 'BusPUVolt'] = 1.05
 
         # The bus voltage moved by 15 1/100ths per unit, and also
         # moved into the "good" range.
@@ -950,11 +952,11 @@ class VoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
     def test_high_and_low_moved_in_range(self):
         """Test multiple buses moving opposite directions, but in bounds
         """
-        self.env.bus_obs_prev.loc[3, 'BusPUVolt'] = 1.07
-        self.env.bus_obs.loc[3, 'BusPUVolt'] = 1.05
+        self.env.bus_obs_data_prev.loc[3, 'BusPUVolt'] = 1.07
+        self.env.bus_obs_data.loc[3, 'BusPUVolt'] = 1.05
 
-        self.env.bus_obs_prev.loc[0, 'BusPUVolt'] = 0.91
-        self.env.bus_obs.loc[0, 'BusPUVolt'] = 1.05
+        self.env.bus_obs_data_prev.loc[0, 'BusPUVolt'] = 0.91
+        self.env.bus_obs_data.loc[0, 'BusPUVolt'] = 1.05
 
         self.assertAlmostEqual(
             self.get_reward_no_action(),
@@ -969,33 +971,33 @@ class VoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
         """If voltages change, but all stay in bounds, there should be
         no reward, only the penalty for taking an action.
         """
-        self.env.bus_obs_prev.loc[0, 'BusPUVolt'] = 0.95
-        self.env.bus_obs.loc[0, 'BusPUVolt'] = 0.96
+        self.env.bus_obs_data_prev.loc[0, 'BusPUVolt'] = 0.95
+        self.env.bus_obs_data.loc[0, 'BusPUVolt'] = 0.96
 
-        self.env.bus_obs_prev.loc[1, 'BusPUVolt'] = 1.0
-        self.env.bus_obs.loc[1, 'BusPUVolt'] = 1.01
+        self.env.bus_obs_data_prev.loc[1, 'BusPUVolt'] = 1.0
+        self.env.bus_obs_data.loc[1, 'BusPUVolt'] = 1.01
 
-        self.env.bus_obs_prev.loc[2, 'BusPUVolt'] = 1.05
-        self.env.bus_obs.loc[2, 'BusPUVolt'] = 1.01
+        self.env.bus_obs_data_prev.loc[2, 'BusPUVolt'] = 1.05
+        self.env.bus_obs_data.loc[2, 'BusPUVolt'] = 1.01
 
-        self.env.bus_obs_prev.loc[3, 'BusPUVolt'] = 0.8
-        self.env.bus_obs.loc[3, 'BusPUVolt'] = 0.8
+        self.env.bus_obs_data_prev.loc[3, 'BusPUVolt'] = 0.8
+        self.env.bus_obs_data.loc[3, 'BusPUVolt'] = 0.8
 
         self.assertAlmostEqual(self.env._compute_reward(),
                                self.rewards['action'])
 
     def test_low_v_gets_lower(self):
         """Should get a penalty for moving a low voltage lower."""
-        self.env.bus_obs_prev.loc[2, 'BusPUVolt'] = 0.93
-        self.env.bus_obs.loc[2, 'BusPUVolt'] = 0.91
+        self.env.bus_obs_data_prev.loc[2, 'BusPUVolt'] = 0.93
+        self.env.bus_obs_data.loc[2, 'BusPUVolt'] = 0.91
 
         self.assertAlmostEqual(
             self.get_reward_no_action(), -2 * self.rewards['v_delta'])
 
     def test_high_v_gets_higher(self):
         """Should get a penalty for moving a high voltage higher."""
-        self.env.bus_obs_prev.loc[3, 'BusPUVolt'] = 1.06
-        self.env.bus_obs.loc[3, 'BusPUVolt'] = 1.09
+        self.env.bus_obs_data_prev.loc[3, 'BusPUVolt'] = 1.06
+        self.env.bus_obs_data.loc[3, 'BusPUVolt'] = 1.09
 
         self.assertAlmostEqual(
             self.get_reward_no_action(), -3 * self.rewards['v_delta'])
@@ -1004,8 +1006,8 @@ class VoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
         """Should get penalty for voltage that was in bounds moving
         out of bounds.
         """
-        self.env.bus_obs_prev.loc[3, 'BusPUVolt'] = 1.05
-        self.env.bus_obs.loc[3, 'BusPUVolt'] = 0.9
+        self.env.bus_obs_data_prev.loc[3, 'BusPUVolt'] = 1.05
+        self.env.bus_obs_data.loc[3, 'BusPUVolt'] = 0.9
 
         self.assertAlmostEqual(
             self.get_reward_no_action(),
@@ -1017,8 +1019,8 @@ class VoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
         """Should get penalty for voltage that was in bounds moving
         out of bounds.
         """
-        self.env.bus_obs_prev.loc[0, 'BusPUVolt'] = 0.96
-        self.env.bus_obs.loc[0, 'BusPUVolt'] = 0.94
+        self.env.bus_obs_data_prev.loc[0, 'BusPUVolt'] = 0.96
+        self.env.bus_obs_data.loc[0, 'BusPUVolt'] = 0.94
 
         self.assertAlmostEqual(
             self.get_reward_no_action(),
