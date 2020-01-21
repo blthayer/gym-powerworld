@@ -350,12 +350,14 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self.branch_reset_fields: Union[list, None] = None
         self.shunt_reset_fields: Union[list, None] = None
 
-        # Now data which will be used during initialization.
-        self.gen_init_data: Union[pd.DataFrame, None] = None
-        self.load_init_data: Union[pd.DataFrame, None] = None
-        self.bus_init_data: Union[pd.DataFrame, None] = None
-        self.branch_init_data: Union[pd.DataFrame, None] = None
-        self.shunt_init_data: Union[pd.DataFrame, None] = None
+        # Now data which will be used during initialization. Note there
+        # are formal properties defined for the non-underscored versions
+        # of these. This is to protect them from being overridden.
+        self._gen_init_data: Union[pd.DataFrame, None] = None
+        self._load_init_data: Union[pd.DataFrame, None] = None
+        self._bus_init_data: Union[pd.DataFrame, None] = None
+        self._branch_init_data: Union[pd.DataFrame, None] = None
+        self._shunt_init_data: Union[pd.DataFrame, None] = None
 
         # Data which will be used in observations.
         self.gen_obs_data: Union[pd.DataFrame, None] = None
@@ -521,6 +523,28 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # All done.
 
     ####################################################################
+    # Initialization data - make sure they have getters but not setters.
+    ####################################################################
+    @property
+    def gen_init_data(self):
+        return self._gen_init_data
+
+    @property
+    def load_init_data(self):
+        return self._load_init_data
+
+    @property
+    def bus_init_data(self):
+        return self._bus_init_data
+
+    @property
+    def branch_init_data(self):
+        return self._branch_init_data
+
+    @property
+    def shunt_init_data(self):
+        return self._shunt_init_data
+    ####################################################################
     # Public methods
     ####################################################################
 
@@ -665,7 +689,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
 
             # ESA will return None if the objects are not present.
             if data is not None:
-                setattr(self, f'{obj}_init_data', data)
+                setattr(self, f'_{obj}_init_data', data)
                 setattr(self, f'num_{plural}', data.shape[0])
             else:
                 setattr(self, f'num_{plural}', 0)
@@ -818,7 +842,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         """
         # Extract a subset of the generator data.
         gens = self.gen_init_data.loc[:, self.gen_key_fields
-                                      + self.GEN_RESET_FIELDS]
+                                      + self.GEN_RESET_FIELDS].copy()
 
         # Turn generators on/off and set their MW set points.
         gens.loc[:, 'GenMW'] = self.gen_mw[self.scenario_idx, :]
@@ -1253,9 +1277,8 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         voltage = self.gen_bins[self.action_array[action, 1]]
         self.saw.ChangeParametersSingleElement(
             ObjectType='gen', ParamList=self.gen_key_fields + ['GenVoltSet'],
-            Values=self.gen_init_data.loc[gen_idx,
-                                          self.gen_key_fields].tolist()
-            + [voltage]
+            Values=(self.gen_init_data.loc[gen_idx,
+                    self.gen_key_fields].tolist() + [voltage])
         )
 
     def _get_observation(self) -> np.ndarray:

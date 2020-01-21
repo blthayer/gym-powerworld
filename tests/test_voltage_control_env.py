@@ -115,7 +115,7 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
         gen_copy['GenMWMin'] = -10
         # I wanted to use self.assertLogs, but that has trouble working
         # with nested context managers...
-        with patch.object(self.env, 'gen_init_data', new=gen_copy):
+        with patch.object(self.env, '_gen_init_data', new=gen_copy):
             with patch.object(self.env, 'saw') as p:
                 self.env._zero_negative_gen_mw_limits()
 
@@ -177,7 +177,7 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
         """
         data = self.env.load_init_data.copy(deep=True)
         data[voltage_control_env.LOAD_I_Z] = 1
-        with patch.object(self.env, 'load_init_data', new=data):
+        with patch.object(self.env, '_load_init_data', new=data):
             with patch.object(self.env, 'saw') as p:
                 self.env._zero_i_z_loads()
 
@@ -233,7 +233,7 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
         # Increase all minimum generation.
         gens['GenMWMin'] = 10
         # Patch:
-        with patch.object(self.env, 'gen_init_data', gens):
+        with patch.object(self.env, '_gen_init_data', gens):
             with patch.object(self.env, 'min_load_mw', 9.9):
                 with self.assertRaisesRegex(UserWarning, 'The given min_load'):
                     self.env._check_min_load(2)
