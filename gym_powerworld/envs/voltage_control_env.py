@@ -1451,6 +1451,303 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         set points are discretized to be in [0.95, 0.975, 1.0, 1.025,
         1.05].
     """
+    # Gen fields. See base class for comments.
+    GEN_INIT_FIELDS = ['GenMW', 'GenMVR', 'GenVoltSet', 'GenMWMax',
+                       'GenMWMin', 'GenMVRMax', 'GenMVRMin', 'GenStatus']
+    GEN_OBS_FIELDS = ['GenMW', 'GenMWMax', 'GenMVA', 'GenMVRPercent',
+                      'GenStatus']
+    # TODO: May need to add voltage set point here.
+    GEN_RESET_FIELDS = ['GenMW', 'GenStatus']
+
+    # Load fields.
+    LOAD_INIT_FIELDS = LOAD_P + LOAD_I_Z
+    LOAD_OBS_FIELDS = []
+    LOAD_RESET_FIELDS = LOAD_P
+
+    # Bus fields.
+    BUS_INIT_FIELDS = []
+    BUS_OBS_FIELDS = ['BusPUVolt', 'BusAngle']
+    BUS_RESET_FIELDS = []
+
+    # Branch fields.
+    BRANCH_INIT_FIELDS = []
+    BRANCH_OBS_FIELDS = ['LineMW', 'LineMVR']
+    BRANCH_RESET_FIELDS = []
+
+    # Shunt fields. TODO
+    SHUNT_INIT_FIELDS = []
+    SHUNT_OBS_FIELDS = []
+    SHUNT_RESET_FIELDS = []
+
+    # Rewards. We'll use similar terminology to that given in the
+    # paper.
+    REWARDS = {
+        # [0.95, 1.05] p.u.
+        'normal': 100,
+        # [0.8, 0.95) p.u. and (1.05, 1.25] p.u.
+        'violation': -50,
+        # [0.0, 0.8) p.u. and (1.25, inf) p.u.
+        'diverged': -100
+    }
+
+    def __init__(self, pwb_path: str, num_scenarios: int,
+                 max_load_factor: float = None,
+                 min_load_factor: float = None,
+                 min_load_pf: float = 0.8,
+                 lead_pf_probability: float = 0.1,
+                 load_on_probability: float = 0.8,
+                 num_gen_voltage_bins: int = 5,
+                 gen_voltage_range: Tuple[float, float] = (0.9, 1.1),
+                 seed: float = None,
+                 log_level=logging.INFO,
+                 rewards: Union[dict, None] = None,
+                 dtype=np.float32):
+        """
+
+        :param pwb_path: Full path to a PowerWorld .pwb file
+            representing the grid which the agent will control.
+        :param num_scenarios: Number of different case initialization
+            scenarios to create. Note it is not guaranteed that the
+            power flow will solve successfully for all cases, so the
+            number of actual usable cases will be less than the
+            num_scenarios.
+        :param max_load_factor: Factor which when multiplied by the
+            current total system load represents the maximum allowable
+            system loading for training episodes in MW. E.g., if the
+            current sum of all the active power components of the loads
+            is 100 MW and the max_load_factor is 2, then the maximum
+            possible active power loading for any given episode will be
+            200 MW. If the max_load_factor is None, the maximum
+            system loading will be computed by the sum of generator
+            maximum MW outputs.
+        :param min_load_factor: Similar to the max_load_factor, this
+            number is multiplied with the current total system load to
+            determine the minimum active power loading for an episode.
+            If None, the minimum system loading will be computed by the
+            sum of generator minimum MW outputs.
+        :param min_load_pf: Minimum load power factor to be used when
+            generating loading scenarios. Should be a positive number
+            in the interval (0, 1].
+        :param lead_pf_probability: Probability on a load by load
+            basis that the power factor will be leading. Should be
+            a positive number in the interval [0, 1].
+        :param load_on_probability: For each scenario, probability
+            to determine on a load by load basis which are "on" (i.e.
+            have power consumption > 0). Should be a positive number
+            on the interval (0, 1].
+        :param num_gen_voltage_bins: Number of intervals/bins to split
+            generator voltage set points into. I.e.,
+            if gen_voltage_range=(0.95, 1.05) and num_gen_voltage_bins
+            is 5, the generator set points will be discretized into the
+            set {0.95, 0.975, 1.0, 1.025, 1.05}.
+        :param gen_voltage_range: Minimum and maximum allowed generator
+            voltage regulation set points (in per unit).
+        :param seed: Seed for random number.
+        :param log_level: Log level for the environment's logger. Pass
+            a constant from the logging module, e.g. logging.DEBUG or
+            logging.INFO.
+        :param rewards: Dictionary of rewards/penalties. For available
+            fields and their descriptions, see the class constant
+            REWARDS. This dictionary can be partial, i.e. include only
+            a subset of fields contained in REWARDS. To use the default
+            rewards, pass in None.
+        :param dtype: Numpy datatype to be used for most numbers. It's
+            common to use np.float32 for machine learning tasks to
+            reduce memory consumption.
+        """
+        # We'll hang onto the max_load_factor and min_load_factor
+        # attributes for this environment.
+        self.min_load_factor = min_load_factor
+        self.max_load_factor = max_load_factor
+
+        # Initialize attribute for tracking episode cumulative rewards.
+        # It'll be reset in _take_extra_reset_actions.
+        self.cumulative_reward = 0
+
+        # Start by calling super constructor.
+        super().__init__(
+            pwb_path=pwb_path, num_scenarios=num_scenarios,
+            max_load_factor=max_load_factor, min_load_factor=min_load_factor,
+            min_load_pf=min_load_pf,
+            lead_pf_probability=lead_pf_probability,
+            load_on_probability=load_on_probability,
+            num_gen_voltage_bins=num_gen_voltage_bins,
+            gen_voltage_range=gen_voltage_range,
+            seed=seed, log_level=log_level, rewards=rewards,
+            dtype=dtype)
+
+        ################################################################
+        # Action space definition
+        ################################################################
+        # The GridMind action space is all possible combinations of the
+        # generator voltage bins.
+        self.action_space = spaces.Discrete(
+            num_gen_voltage_bins ** self.num_gens)
+
+        ################################################################
+        # Observation space definition
+        ################################################################
+
+        # Time for the observation space. This will include:
+        #   - bus voltages
+        #   - bus voltage angles
+        #   - line active power
+        #   - line reactive power
+        self.num_obs = self.num_buses * 2 + self.num_branches * 2
+        # TODO: Low and high is tricky here... Voltages and angles can
+        #   easily be scaled such that the maximum is 1 (extreme over
+        #   voltages can simply be truncated). However, the line loading
+        #   is a different story.
+        self.observation_space = spaces.Box(
+            low=0, high=1, shape=(self.num_obs,), dtype=self.dtype)
+
+        # All done.
+
+    def _compute_loading(self, *args, **kwargs):
+        """As far as I can tell, the GridMind loading is dead simple -
+        they scale each load between 80% and 120% of original.
+
+        Here's the text from the paper:
+        "Random  load  changes  are  applied across the entire system,
+        and each load fluctuates within 80%-120% of its original value."
+        """
+        # Solve the power flow for the initial case and get loading.
+        # We can't assume that the case has already been solved.
+        self.saw.SolvePowerFlow()
+        loads = self.saw.GetParametersMultipleElement(
+            ObjectType='load',
+            ParamList=(self.load_key_fields + LOAD_P)
+        )
+
+        # Define load array shape for convenience.
+        shape = (self.num_scenarios, self.num_loads)
+
+        # Randomly draw an array between the minimum load factor and
+        # maximum load factor.
+        load_factor = self.rng.uniform(
+            self.min_load_factor, self.max_load_factor, shape)
+
+        # Create arrays to hold individual load MW and Mvar loading.
+        scenario_individual_loads_mw = (
+            np.tile(loads['LoadSMW'].to_numpy(), (self.num_scenarios, 1))
+            * load_factor
+        )
+        scenario_individual_loads_mvar = (
+            np.tile(loads['LoadSMVR'].to_numpy(), (self.num_scenarios, 1))
+            * load_factor
+        )
+
+        # Return.
+        return scenario_individual_loads_mw.sum(axis=1),\
+            scenario_individual_loads_mw, scenario_individual_loads_mvar
+
+    def _compute_generation(self):
+        """Here's the relevant text from the paper:
+
+        "When loads change, generators are re-dispatched based on a
+        participation factor list to maintain system power balance."
+
+        I have to assume that the participation factor list is fixed,
+        but maybe it isn't?
+
+        The simplest approach here is to simply use PowerWorld to
+        enforce participation factors. Several steps are required:
+        - Turn on participation factor AGC for the area
+        - Set AGC tolerance to be low (say 0.01MW) for the area
+        - Turn on AGC for all generators
+        - Set participation factor for all generators based on their
+            MW rating.
+        """
+        # Start by getting data for areas.
+        area_kf = self.saw.get_key_field_list(ObjectType='area')
+        areas = self.saw.GetParametersMultipleElement(
+            ObjectType='area',
+            ParamList=(area_kf + ['ConvergenceTol', 'BGAGC']))
+
+        # Put the a areas in participation factor AGC with a small
+        # tolerance.
+        areas['ConvergenceTol'] = 0.01
+        areas['BGAGC'] = 'Part. AGC'
+        self.saw.change_and_confirm_params_multiple_element(
+            ObjectType='area', command_df=areas)
+
+        # Get data for generators.
+        gens = self.saw.GetParametersMultipleElement(
+            ObjectType='gen',
+            ParamList=(self.gen_key_fields
+                       + ['GenAGCAble', 'GenEnforceMWLimits'])
+        )
+
+        # Make all generators AGCAble and ensure MW limits are followed.
+        # TODO: Need exceptions for wind and other non-dispatchable
+        #  resources
+        gens['GenAGCAble'] = 'YES'
+        gens['GenEnforceMWLimits'] = 'YES'
+        self.saw.change_and_confirm_params_multiple_element(
+            ObjectType='gen', command_df=gens
+        )
+
+        # Set participation factors for all generators in the system.
+        self.saw.RunScriptCommand(
+            'SetParticipationFactors(MAXMWRAT, 0, SYSTEM);')
+
+        # Nothing to return.
+        return None
+
+    def _set_gens_for_scenario(self):
+        """Since we're using PowerWorld's participation factor AGC to
+        change generators, no need to actually set generation. So,
+        we'll simply override this method so it does nothing.
+        """
+        pass
+
+    def _compute_reward(self):
+        """The reward structure for GridMind is pretty primitive. Simple
+        rewards/penalties for buses in particular zones.
+        """
+        # Get a pointer to bus data to save typing.
+        bus = self.bus_obs_data
+
+        # Penalize "diverged" buses
+        reward = (
+                (
+                    (bus['BusPUVolt'] <= 0.8).sum()
+                    + (bus['BusPUVolt'] >= 1.25).sum()
+                )
+                * self.rewards['diverged'])
+
+        # Penalize "violation" buses
+        reward += (
+                ((bus['BusPUVolt'].between(0.8, 0.95, inclusive=False)).sum()
+                 + (bus['BusPUVolt'].between(1.05, 1.25,
+                                             inclusive=False)).sum()
+                 )
+                * self.rewards['violation'])
+
+        # Reward "normal" buses
+        reward += (
+                bus['BusPUVolt'].between(0.95, 1.05, inclusive=True).sum()
+                * self.rewards['normal'])
+
+        # Bump the cumulative reward.
+        self.cumulative_reward += reward
+
+        return reward
+
+    def _get_observation(self):
+        pass
+
+    def _take_action(self, action):
+        pass
+
+    def _extra_reset_actions(self):
+        """Reset the cumulative reward."""
+        self.cumulative_reward = 0
+
+    def _compute_end_of_episode_reward(self):
+        """Simply cumulative reward divided by number of actions.
+        """
+        return self.cumulative_reward / self.action_count
 
 
 class Error(Exception):

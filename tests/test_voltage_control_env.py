@@ -1029,5 +1029,219 @@ class DiscreteVoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
             -1 * self.rewards['v_delta'] + self.rewards['v_out_bounds'])
 
 
+# noinspection DuplicatedCode
+class GridMindControlEnv14BusInitTestCase(unittest.TestCase):
+    """Test the initialization of the environment."""
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 1000
+        cls.max_load_factor = 1.2
+        cls.min_load_factor = 0.8
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.num_gen_voltage_bins = 5
+        cls.gen_voltage_range = (0.95, 1.05)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+
+        cls.rewards = {
+            "normal": 100,
+            "violation": -50,
+            "diverged": -100
+        }
+
+        cls.env = voltage_control_env.GridMindEnv(
+            pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
+            max_load_factor=cls.max_load_factor,
+            min_load_factor=cls.min_load_factor,
+            min_load_pf=cls.min_load_pf,
+            lead_pf_probability=cls.lead_pf_probability,
+            load_on_probability=cls.load_on_probability,
+            num_gen_voltage_bins=cls.num_gen_voltage_bins,
+            gen_voltage_range=cls.gen_voltage_range,
+            seed=cls.seed,
+            log_level=logging.INFO,
+            rewards=cls.rewards,
+            dtype=cls.dtype
+        )
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.close()
+
+    def test_loading(self):
+        """Ensure all load values are set and are in bounds."""
+        # Compare MW.
+        original_mw = self.env.load_init_data['LoadSMW'].to_numpy()
+
+        # I feel like there has to be a better way to do this, but
+        # I failed to find it.
+        #
+        # Ensure all loads are at or above the minimum.
+        # noinspection PyUnresolvedReferences
+        self.assertTrue(
+            ((np.tile(original_mw, (self.num_scenarios, 1))
+             * self.min_load_factor)
+             <= self.env.loads_mw).all()
+        )
+
+        # Ensure all loads are at or below the maximum.
+        self.assertTrue(
+            ((np.tile(original_mw, (self.num_scenarios, 1))
+              * self.max_load_factor)
+             >= self.env.loads_mw).all()
+        )
+
+        # Ensure total loading matches.
+        np.testing.assert_array_equal(
+            self.env.total_load_mw, self.env.loads_mw.sum(axis=1))
+
+        # Ensure shapes are correct.
+        self.assertEqual(self.env.total_load_mw.shape, (self.num_scenarios,))
+        self.assertEqual(self.env.loads_mw.shape,
+                         (self.num_scenarios, self.env.num_loads))
+        self.assertEqual(self.env.loads_mvar.shape,
+                         (self.num_scenarios, self.env.num_loads))
+
+    def test_generation(self):
+        """Change loading in the case, solve the power flow, and ensure
+        all gens pick up the difference.
+        """
+        try:
+            load_copy = self.env.load_init_data.copy(deep=True)
+
+            # Increase loading.
+            load_copy['LoadSMW'] = load_copy['LoadSMW'] * 1.2
+            self.env.saw.change_and_confirm_params_multiple_element(
+                ObjectType='load', command_df=load_copy)
+
+            # Solve the power flow.
+            self.env.saw.SolvePowerFlow()
+
+            # Now get generator information.
+            gen_data = self.env.saw.GetParametersMultipleElement(
+                ObjectType='gen', ParamList=self.env.gen_init_fields
+            )
+
+            # Take the difference.
+            delta = (gen_data['GenMW']
+                     - self.env.gen_init_data['GenMW']).to_numpy()
+
+            # All generators should take on some load.
+            np.testing.assert_array_less(0, delta)
+
+            # All generator increases should be nearly the same. The
+            # slack will have some differences - we'll allow for 0.5%
+            # relative tolerance.
+            np.testing.assert_allclose(actual=delta, desired=delta[-1],
+                                       rtol=0.005)
+        finally:
+            self.env.saw.LoadState()
+
+
+# noinspection DuplicatedCode
+class GridMindControlEnv14BusRewardTestCase(unittest.TestCase):
+    """Test the _compute_reward method."""
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 1000
+        cls.max_load_factor = 1.2
+        cls.min_load_factor = 0.8
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.num_gen_voltage_bins = 5
+        cls.gen_voltage_range = (0.95, 1.05)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+
+        cls.rewards = {
+            "normal": 100,
+            "violation": -50,
+            "diverged": -100
+        }
+
+        cls.env = voltage_control_env.GridMindEnv(
+            pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
+            max_load_factor=cls.max_load_factor,
+            min_load_factor=cls.min_load_factor,
+            min_load_pf=cls.min_load_pf,
+            lead_pf_probability=cls.lead_pf_probability,
+            load_on_probability=cls.load_on_probability,
+            num_gen_voltage_bins=cls.num_gen_voltage_bins,
+            gen_voltage_range=cls.gen_voltage_range,
+            seed=cls.seed,
+            log_level=logging.INFO,
+            rewards=cls.rewards,
+            dtype=cls.dtype
+        )
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.close()
+
+    def setUp(self) -> None:
+        """Override the relevant observation DataFrames.
+        """
+        # 6 buses with unity per unit voltage.
+        v_df = pd.DataFrame(
+            [[1., 'a'], [1., 'b'], [1., 'c'], [1., 'd'], [1., 'e'], [1., 'f']],
+            columns=['BusPUVolt', 'junk'])
+
+        self.env.bus_obs_data_prev = v_df.copy()
+        self.env.bus_obs_data = v_df.copy()
+
+    def test_all_normal(self):
+        """All buses in normal zone."""
+        reward = self.env._compute_reward()
+        self.assertEqual(reward,
+                         self.rewards['normal']
+                         * self.env.bus_obs_data.shape[0])
+
+    def test_all_diverged(self):
+        """All buses in diverged zone."""
+        self.env.bus_obs_data['BusPUVolt'] = \
+            np.array([0.0, 1.25, 200, 0.8, 0.5, 1.26])
+
+        reward = self.env._compute_reward()
+        self.assertEqual(reward,
+                         self.rewards['diverged']
+                         * self.env.bus_obs_data.shape[0])
+
+    def test_all_violation(self):
+        """All buses in violation zone."""
+        self.env.bus_obs_data['BusPUVolt'] = \
+            np.array([0.81, 1.06, 1.249, 0.949, 0.9, 1.1])
+
+        reward = self.env._compute_reward()
+        self.assertEqual(reward,
+                         self.rewards['violation']
+                         * self.env.bus_obs_data.shape[0])
+
+    def test_mixed(self):
+        """Test a mixture of bus zones."""
+        self.env.bus_obs_data['BusPUVolt'] = \
+            np.array([0.81, 0.79, 1., 1.02, 1.06, 1.04])
+
+        reward = self.env._compute_reward()
+        expected = (self.rewards['violation'] * 2
+                    + self.rewards['normal'] * 3
+                    + self.rewards['diverged'] * 1)
+        self.assertEqual(reward, expected)
+
+
 if __name__ == '__main__':
     unittest.main()
