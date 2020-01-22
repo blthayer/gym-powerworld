@@ -64,6 +64,10 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     - _compute_loading
     - _compute_generation
     - _take_action
+    - _get_observation
+    - _compute_reward
+    - _extra_reset_actions
+    - _compute_end_of_episode_reward
 
     Note that the initialization method of this class solves the power
     flow and calls the SaveState method, so subclasses may need to
@@ -233,7 +237,9 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                  seed: float = None,
                  log_level=logging.INFO,
                  rewards: Union[dict, None] = None,
-                 dtype=np.float32):
+                 dtype=np.float32,
+                 low_v: float = LOW_V,
+                 high_v: float = HIGH_V):
         """Initialize the environment. Pull data needed up front,
         create gen/loading cases, perform case checks, etc.
 
@@ -287,6 +293,12 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         :param dtype: Numpy datatype to be used for most numbers. It's
             common to use np.float32 for machine learning tasks to
             reduce memory consumption.
+        :param low_v: Low end of voltage range that is considered
+            acceptable (inclusive). Defaults to LOW_V constant, which at
+            the time of writing was 0.95 p.u.
+        :param high_v: high end of voltage range that is considered
+            acceptable (inclusive). Defaults to HIGH_V constant, which
+            at the time of writing was 1.05 p.u.
         """
         ################################################################
         # Logging, seeding, SAW initialization, simple attributes
@@ -313,6 +325,10 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Scenario index starts at one, and is incremented for each
         # episode.
         self.scenario_idx = 0
+
+        # Track low and high v.
+        self.low_v = low_v
+        self.high_v = high_v
 
         ################################################################
         # Initialize PowerWorld related attributes, get data from case
@@ -491,11 +507,6 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Subclasses should set num_obs and observation_space
         # attributes.
 
-        # Initialize attribute for checking if all voltages are in
-        # range. This will be used to check if an episode is done, and
-        # will be reset in the "reset" method.
-        self.all_v_in_range = False
-
         # We'll track how many actions the agent has taken in an episode
         # as part of the stopping criteria.
         self.action_count = 0
@@ -544,6 +555,17 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     @property
     def shunt_init_data(self):
         return self._shunt_init_data
+
+    ####################################################################
+    # Misc properties
+    ####################################################################
+    @property
+    def all_v_in_range(self):
+        """True if all voltages are on interval
+        [self.low_v, self.high_v], False otherwise."""
+        return self.bus_obs_data['BusPUVolt'].between(
+            self.low_v, self.high_v, inclusive=True).all()
+
     ####################################################################
     # Public methods
     ####################################################################
@@ -563,11 +585,11 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         and load P/Q will be set. Finally, the power flow will be
         solved and an initial observation will be returned.
         """
+        # Take extra reset actions as defined by the subclass.
+        self._extra_reset_actions()
+
         # Reset the action counter.
         self.action_count = 0
-
-        # Reset all_v_in_range.
-        self.all_v_in_range = False
 
         done = False
 
@@ -631,6 +653,10 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             # and check to see if this episode is done.
             reward = self._compute_reward()
             done = self._check_done()
+
+        # Some subclasses may wish to add an end of episode reward.
+        if done:
+            reward += self._compute_end_of_episode_reward()
 
         # TODO: update the fourth return (info) to, you know, actually
         #   give info.
@@ -792,13 +818,6 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Get new observations, rotate old ones.
         self._rotate_and_get_observation_frames()
 
-        # Check if all voltages are in range.
-        self.all_v_in_range = (
-                ((self.bus_obs_data['BusPUVolt'] < LOW_V)
-                 & (self.bus_obs_data['BusPUVolt'] > HIGH_V)).sum()
-                == 0
-        )
-
         # If any voltages are too low, raise exception.
         if (self.bus_obs_data['BusPUVolt'] < MIN_V).any():
             num_low = (self.bus_obs_data['BusPUVolt'] < MIN_V).sum()
@@ -932,6 +951,19 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     def _compute_reward(self):
         """Subclasses should implement a _compute_reward method which
         computes a reward for a given action.
+        """
+
+    @abstractmethod
+    def _extra_reset_actions(self):
+        """Subclasses should implement this method, which is called at
+        the beginning of "reset".
+        """
+
+    @abstractmethod
+    def _compute_end_of_episode_reward(self):
+        """Subclasses should implement this method, which will, well,
+        compute an end of episode reward (if desired). If not desired,
+        just return 0.
         """
 
 
@@ -1372,12 +1404,6 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         # Give an extra reward for moving buses in bounds.
         reward += out_in.sum() * self.rewards['v_in_bounds']
 
-        # Check if all voltages are in range.
-        if (low_v_now & high_v_now).sum() == 0:
-            self.all_v_in_range = True
-        else:
-            self.all_v_in_range = False
-
         # Give a positive reward for lessening generator var loading,
         # and a negative reward for increasing it.
         # TODO: This really should account for actual vars not just
@@ -1389,6 +1415,15 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
 
         # All done.
         return reward
+
+    def _extra_reset_actions(self):
+        """No extra reset actions needed here."""
+        pass
+
+    def _compute_end_of_episode_reward(self):
+        """For now, no end of episode reward.
+        """
+        return 0
 
 
 # noinspection PyAbstractClass
