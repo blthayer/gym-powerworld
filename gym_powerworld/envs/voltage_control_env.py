@@ -1041,60 +1041,10 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
                  seed: float = None,
                  log_level=logging.INFO,
                  rewards: Union[dict, None] = None,
-                 dtype=np.float32):
+                 dtype=np.float32, low_v=LOW_V, high_v=HIGH_V):
+        """See parent class for parameter definitions.
         """
 
-        :param pwb_path: Full path to a PowerWorld .pwb file
-            representing the grid which the agent will control.
-        :param num_scenarios: Number of different case initialization
-            scenarios to create. Note it is not guaranteed that the
-            power flow will solve successfully for all cases, so the
-            number of actual usable cases will be less than the
-            num_scenarios.
-        :param max_load_factor: Factor which when multiplied by the
-            current total system load represents the maximum allowable
-            system loading for training episodes in MW. E.g., if the
-            current sum of all the active power components of the loads
-            is 100 MW and the max_load_factor is 2, then the maximum
-            possible active power loading for any given episode will be
-            200 MW. If the max_load_factor is None, the maximum
-            system loading will be computed by the sum of generator
-            maximum MW outputs.
-        :param min_load_factor: Similar to the max_load_factor, this
-            number is multiplied with the current total system load to
-            determine the minimum active power loading for an episode.
-            If None, the minimum system loading will be computed by the
-            sum of generator minimum MW outputs.
-        :param min_load_pf: Minimum load power factor to be used when
-            generating loading scenarios. Should be a positive number
-            in the interval (0, 1].
-        :param lead_pf_probability: Probability on a load by load
-            basis that the power factor will be leading. Should be
-            a positive number in the interval [0, 1].
-        :param load_on_probability: For each scenario, probability
-            to determine on a load by load basis which are "on" (i.e.
-            have power consumption > 0). Should be a positive number
-            on the interval (0, 1].
-        :param num_gen_voltage_bins: Number of intervals/bins to split
-            generator voltage set points into. I.e.,
-            if gen_voltage_range=(0.95, 1.05) and num_gen_voltage_bins
-            is 5, the generator set points will be discretized into the
-            set {0.95, 0.975, 1.0, 1.025, 1.05}.
-        :param gen_voltage_range: Minimum and maximum allowed generator
-            voltage regulation set points (in per unit).
-        :param seed: Seed for random number.
-        :param log_level: Log level for the environment's logger. Pass
-            a constant from the logging module, e.g. logging.DEBUG or
-            logging.INFO.
-        :param rewards: Dictionary of rewards/penalties. For available
-            fields and their descriptions, see the class constant
-            REWARDS. This dictionary can be partial, i.e. include only
-            a subset of fields contained in REWARDS. To use the default
-            rewards, pass in None.
-        :param dtype: Numpy datatype to be used for most numbers. It's
-            common to use np.float32 for machine learning tasks to
-            reduce memory consumption.
-        """
         # Start by calling super constructor.
         super().__init__(
             pwb_path=pwb_path, num_scenarios=num_scenarios,
@@ -1105,7 +1055,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
             num_gen_voltage_bins=num_gen_voltage_bins,
             gen_voltage_range=gen_voltage_range,
             seed=seed, log_level=log_level, rewards=rewards,
-            dtype=dtype)
+            dtype=dtype, low_v=low_v, high_v=high_v)
 
         ################################################################
         # Action space definition
@@ -1501,59 +1451,8 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
                  seed: float = None,
                  log_level=logging.INFO,
                  rewards: Union[dict, None] = None,
-                 dtype=np.float32):
-        """
-
-        :param pwb_path: Full path to a PowerWorld .pwb file
-            representing the grid which the agent will control.
-        :param num_scenarios: Number of different case initialization
-            scenarios to create. Note it is not guaranteed that the
-            power flow will solve successfully for all cases, so the
-            number of actual usable cases will be less than the
-            num_scenarios.
-        :param max_load_factor: Factor which when multiplied by the
-            current total system load represents the maximum allowable
-            system loading for training episodes in MW. E.g., if the
-            current sum of all the active power components of the loads
-            is 100 MW and the max_load_factor is 2, then the maximum
-            possible active power loading for any given episode will be
-            200 MW. If the max_load_factor is None, the maximum
-            system loading will be computed by the sum of generator
-            maximum MW outputs.
-        :param min_load_factor: Similar to the max_load_factor, this
-            number is multiplied with the current total system load to
-            determine the minimum active power loading for an episode.
-            If None, the minimum system loading will be computed by the
-            sum of generator minimum MW outputs.
-        :param min_load_pf: Minimum load power factor to be used when
-            generating loading scenarios. Should be a positive number
-            in the interval (0, 1].
-        :param lead_pf_probability: Probability on a load by load
-            basis that the power factor will be leading. Should be
-            a positive number in the interval [0, 1].
-        :param load_on_probability: For each scenario, probability
-            to determine on a load by load basis which are "on" (i.e.
-            have power consumption > 0). Should be a positive number
-            on the interval (0, 1].
-        :param num_gen_voltage_bins: Number of intervals/bins to split
-            generator voltage set points into. I.e.,
-            if gen_voltage_range=(0.95, 1.05) and num_gen_voltage_bins
-            is 5, the generator set points will be discretized into the
-            set {0.95, 0.975, 1.0, 1.025, 1.05}.
-        :param gen_voltage_range: Minimum and maximum allowed generator
-            voltage regulation set points (in per unit).
-        :param seed: Seed for random number.
-        :param log_level: Log level for the environment's logger. Pass
-            a constant from the logging module, e.g. logging.DEBUG or
-            logging.INFO.
-        :param rewards: Dictionary of rewards/penalties. For available
-            fields and their descriptions, see the class constant
-            REWARDS. This dictionary can be partial, i.e. include only
-            a subset of fields contained in REWARDS. To use the default
-            rewards, pass in None.
-        :param dtype: Numpy datatype to be used for most numbers. It's
-            common to use np.float32 for machine learning tasks to
-            reduce memory consumption.
+                 dtype=np.float32, low_v=LOW_V, high_v=HIGH_V):
+        """See parent class for parameter descriptions.
         """
         # We'll hang onto the max_load_factor and min_load_factor
         # attributes for this environment.
@@ -1574,7 +1473,7 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
             num_gen_voltage_bins=num_gen_voltage_bins,
             gen_voltage_range=gen_voltage_range,
             seed=seed, log_level=log_level, rewards=rewards,
-            dtype=dtype)
+            dtype=dtype, low_v=low_v, high_v=high_v)
 
         ################################################################
         # Action space definition
@@ -1734,11 +1633,18 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
 
         return reward
 
-    def _get_observation(self):
-        pass
+    def _get_observation(self) -> np.ndarray:
+        """Zeyu thinks GridMind only used voltage magnitudes for
+        states. Let's go with that for now.
+        """
+        return self.bus_obs_data['BusPUVolt'].to_numpy(dtype=self.dtype)
 
-    def _take_action(self, action):
-        pass
+    def _take_action(self, action: int):
+        """Select the appropriate permutation/combination of voltage
+        set points according to the given action.
+        """
+        # TODO
+        raise NotImplementedError()
 
     def _extra_reset_actions(self):
         """Reset the cumulative reward."""
