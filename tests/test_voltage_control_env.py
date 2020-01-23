@@ -1,7 +1,9 @@
 import unittest
 from unittest.mock import patch
 from gym_powerworld.envs import voltage_control_env
-from gym_powerworld.envs.voltage_control_env import LOSS
+from gym_powerworld.envs.voltage_control_env import LOSS, \
+    MinLoadBelowMinGenError, MaxLoadAboveMaxGenError, OutOfScenariosError, \
+    ComputeGenMaxIterationsError
 import os
 import pandas as pd
 import numpy as np
@@ -122,7 +124,7 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
         # The gen_copy should have had its GenMWMin values zeroed out.
         self.assertTrue((gen_copy['GenMWMin'] == 0).all())
 
-        # change_and_confirm_params_multiple_element should have been
+        # change_parameters_multiple_element_df should have been
         # called.
         p.change_and_confirm_params_multiple_element.assert_called_once()
 
@@ -211,7 +213,8 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
         """
         with patch.object(self.env, 'max_load_mw', 10):
             with patch.object(self.env, 'gen_mw_capacity', 9.9):
-                with self.assertRaisesRegex(UserWarning, 'The given max_load'):
+                with self.assertRaisesRegex(MaxLoadAboveMaxGenError,
+                                            'The given max_load'):
                     self.env._check_max_load(2)
 
     def test_check_max_load_warning(self):
@@ -235,7 +238,8 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
         # Patch:
         with patch.object(self.env, '_gen_init_data', gens):
             with patch.object(self.env, 'min_load_mw', 9.9):
-                with self.assertRaisesRegex(UserWarning, 'The given min_load'):
+                with self.assertRaisesRegex(MinLoadBelowMinGenError,
+                                            'The given min_load'):
                     self.env._check_min_load(2)
 
     def test_total_load_mw(self):
@@ -375,9 +379,12 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
         # Test shape.
         self.assertEqual(self.env.observation_space.shape, (self.env.num_obs,))
 
-        # Test bounds. At present, we're using the range [0, 1] for all
-        # bounds.
-        self.assertTrue((self.env.observation_space.high == 1.).all())
+        # Test bounds. Bus voltages should have a high of 2, and the
+        # rest should have a high of 1.
+        self.assertTrue((self.env.observation_space.high[
+                         0:self.env.num_buses] == 2.).all())
+        self.assertTrue((self.env.observation_space.high[
+                         self.env.num_buses:] == 1.).all())
         self.assertTrue((self.env.observation_space.low == 0.).all())
 
     def test_observation_attributes(self):
@@ -502,7 +509,7 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
         # Patch the changing of parameters so that we'll get a
         # a consistent incrementing of the index (no failed power flow).
         with patch.object(self.env.saw,
-                          'change_and_confirm_params_multiple_element'):
+                          'change_parameters_multiple_element_df'):
             self.env.reset()
             self.assertEqual(1, self.env.scenario_idx)
             self.env.reset()
@@ -515,7 +522,7 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
         # Patch the changing of parameters so that we'll get a
         # a consistent incrementing of the index (no failed power flow).
         with patch.object(self.env.saw,
-                          'change_and_confirm_params_multiple_element'):
+                          'change_parameters_multiple_element_df'):
             self.env.action_count = 10
             self.env.reset()
             self.assertEqual(0, self.env.action_count)
@@ -532,7 +539,7 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
         # Patch the changing of parameters so that we'll get a
         # a consistent incrementing of the index (no failed power flow).
         with patch.object(self.env.saw,
-                          'change_and_confirm_params_multiple_element'):
+                          'change_parameters_multiple_element_df'):
             with patch.object(
                     self.env.saw, 'LoadState',
                     side_effect=self.env.saw.LoadState) as p:
@@ -670,7 +677,7 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
                           side_effect=PowerWorldError('failure')):
             with patch.object(self.env, 'num_scenarios', new=5):
                 with self.assertRaisesRegex(
-                        UserWarning, 'We have gone through all scenarios'):
+                        OutOfScenariosError, 'We have gone through all scenarios'):
                     self.env.reset()
 
     def test_reset_returns_proper_observation(self):
@@ -1397,6 +1404,7 @@ class GridMindControlEnv14BusMiscTestCase(unittest.TestCase):
 
         np.testing.assert_allclose(gens['GenVoltSet'].to_numpy(),
                                    self.gen_voltage_range[1])
+
 
 if __name__ == '__main__':
     unittest.main()

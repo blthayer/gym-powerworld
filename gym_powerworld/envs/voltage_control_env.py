@@ -36,7 +36,6 @@ LOSS = 0.03
 MIN_V = 0.75
 
 # Specify bus voltage bounds.
-# TODO: May want to consider 0.9 to 1.1.
 LOW_V = 0.95
 HIGH_V = 1.05
 NOMINAL_V = 1.0
@@ -424,10 +423,8 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # For convenience, compute the maximum generation capacity.
         # Depending on max_load_factor, gen_mw_capacity could also
         # represent maximum loading.
-        # TODO: Confirm that the produce/consume convention is correct.
         self.gen_mw_capacity = self.gen_init_data['GenMWMax'].sum()
         self.gen_mvar_produce_capacity = self.gen_init_data['GenMVRMax'].sum()
-        # TODO: Should we use abs here?
         self.gen_mvar_consume_capacity = self.gen_init_data['GenMVRMin'].sum()
 
         ################################################################
@@ -621,9 +618,8 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                 self.scenario_idx += 1
 
         # Raise exception if we've gone through all the scenarios.
-        # TODO: better exception.
         if self.scenario_idx >= self.num_scenarios:
-            raise UserWarning('We have gone through all scenarios.')
+            raise OutOfScenariosError('We have gone through all scenarios.')
 
         # Return the observation.
         # noinspection PyUnboundLocalVariable
@@ -644,7 +640,6 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         except (PowerWorldError, LowVoltageError):
             # The power flow failed to solve or bus voltages went below
             # the minimum. This episode is complete.
-            # TODO: Should our observation be None?
             obs = None
             done = True
             # An action was taken, so include both the action and
@@ -754,8 +749,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         warn if generation capacity is >= 2 * maximum loading.
         """
         if self.max_load_mw > self.gen_mw_capacity:
-            # TODO: Better exception.
-            raise UserWarning(
+            raise MaxLoadAboveMaxGenError(
                 f'The given max_load_factor, {max_load_factor:.3f} '
                 f'resulted in maximum loading of {self.max_load_mw:.3f} MW'
                 ', but the generator active power capacity is only '
@@ -778,8 +772,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         """
         min_gen = self.gen_init_data['GenMWMin'].min()
         if self.min_load_mw < min_gen:
-            # TODO: better exception.
-            raise UserWarning(
+            raise MinLoadBelowMinGenError(
                 f'The given min_load_factor, {min_load_factor:.3f}, '
                 'results in a minimum system loading of '
                 f'{self.min_load_mw:3f} MW, but the lowest generation '
@@ -870,10 +863,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         gen_g_0 = self.gen_mw[self.scenario_idx, :] > 0
         gens.loc[gen_g_0, 'GenStatus'] = 'Closed'
         gens.loc[~gen_g_0, 'GenStatus'] = 'Open'
-        # TODO: may want to use a faster command like
-        #   ChangeParametersMultipleElement. NOTE: Will need to
-        #   update patching in tests if this route is taken.
-        self.saw.change_and_confirm_params_multiple_element('gen', gens)
+        self.saw.change_parameters_multiple_element_df('gen', gens)
 
     def _set_loads_for_scenario(self):
         """Helper to set up loads in the case for this episode/scenario.
@@ -886,10 +876,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Set P and Q.
         loads.loc[:, 'LoadSMW'] = self.loads_mw[self.scenario_idx, :]
         loads.loc[:, 'LoadSMVR'] = self.loads_mvar[self.scenario_idx, :]
-        # TODO: may want to use a faster command like
-        #   ChangeParametersMultipleElement. NOTE: Will need to
-        #   update patching in tests if this route is taken.
-        self.saw.change_and_confirm_params_multiple_element('load', loads)
+        self.saw.change_parameters_multiple_element_df('load', loads)
 
     def _check_done(self):
         """Check whether (True) or not (False) and episode is done. Call
@@ -985,7 +972,6 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
                        'GenMWMin', 'GenMVRMax', 'GenMVRMin', 'GenStatus']
     GEN_OBS_FIELDS = ['GenMW', 'GenMWMax', 'GenMVA', 'GenMVRPercent',
                       'GenStatus']
-    # TODO: May need to add voltage set point here.
     GEN_RESET_FIELDS = ['GenMW', 'GenStatus']
 
     # Load fields.
@@ -1112,11 +1098,18 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         # We'll leave out a flag for generator lead/lag, because they
         # will almost always be producing rather than consuming vars.
         # May want to change this in the future.
-        # TODO: How best to handle low/high? Could use independent
-        #   bounds for each observation type.
         self.num_obs = self.num_buses + 3 * self.num_gens + 3 * self.num_loads
+        low = np.zeros(self.num_obs, dtype=self.dtype)
+        # Put a cap of 2 p.u. voltage on observations - I don't see how
+        # bus voltages could ever get that high.
+        bus_high = np.ones(self.num_buses, dtype=self.dtype) + 1
+        # The rest will have a maximum of 1.
+        rest_high = np.ones(3 * self.num_gens + 3 * self.num_loads,
+                            dtype=self.dtype)
+        # Create the observation space.
         self.observation_space = spaces.Box(
-            low=0, high=1, shape=(self.num_obs,), dtype=self.dtype)
+            low=low, high=np.concatenate((bus_high, rest_high)),
+            dtype=self.dtype)
 
         # All done.
 
@@ -1192,10 +1185,8 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         # Initialize indices that we'll be shuffling.
         gen_indices = np.arange(0, self.num_gens)
 
-        # Loop over each scenario.
-        # TODO: this should be vectorized.
-        # TODO: should we instead draw which generators are on like
-        #   what's done with the load? It'll have similar issues.
+        # Loop over each scenario. This may not be the most efficient,
+        # and could possible be vectorized.
         for scenario_idx in range(self.num_scenarios):
             # Draw random indices for generators. In this way, we'll
             # start with a different generator each time.
@@ -1249,8 +1240,8 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
                 i += 1
 
             if i >= ITERATION_MAX:
-                # TODO: better exception.
-                raise UserWarning(f'Iterations exceeded {ITERATION_MAX}')
+                raise ComputeGenMaxIterationsError(
+                    f'Iterations exceeded {ITERATION_MAX}')
 
             self.log.debug(f'It took {i} iterations to create generation for '
                            f'scenario {scenario_idx}')
@@ -1263,8 +1254,6 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         """
         # Look up action and send to PowerWorld.
         gen_idx = self.action_array[action, 0]
-        # TODO: it might be worth short-circuiting everything if the
-        #   action won't do anything (e.g. the generator is off).
         voltage = self.gen_bins[self.action_array[action, 1]]
         self.saw.ChangeParametersSingleElement(
             ObjectType='gen', ParamList=self.gen_key_fields + ['GenVoltSet'],
@@ -1285,7 +1274,6 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         return np.concatenate([
             # Bus voltages.
             self.bus_obs_data['BusPUVolt'].to_numpy(dtype=self.dtype),
-            # TODO: Bus voltage angles?
             # Generator active power divide by maximum active power.
             (self.gen_obs_data['GenMW']
              / self.gen_obs_data['GenMWMax']).to_numpy(dtype=self.dtype),
@@ -1419,7 +1407,6 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
                        'GenMWMin', 'GenMVRMax', 'GenMVRMin', 'GenStatus']
     GEN_OBS_FIELDS = ['GenMW', 'GenMWMax', 'GenMVA', 'GenMVRPercent',
                       'GenStatus']
-    # TODO: May need to add voltage set point here.
     GEN_RESET_FIELDS = ['GenMW', 'GenStatus']
 
     # Load fields.
@@ -1508,18 +1495,13 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         # Observation space definition
         ################################################################
 
-        # Time for the observation space. This will include:
-        #   - bus voltages
-        #   - bus voltage angles
-        #   - line active power
-        #   - line reactive power
-        self.num_obs = self.num_buses * 2 + self.num_branches * 2
-        # TODO: Low and high is tricky here... Voltages and angles can
-        #   easily be scaled such that the maximum is 1 (extreme over
-        #   voltages can simply be truncated). However, the line loading
-        #   is a different story.
+        # Time for the observation space. We're just going with bus
+        # voltage magnitudes.
+        self.num_obs = self.num_buses
+        # Put 2 as the maximum - there's no way we can get a bus to
+        # two p.u.
         self.observation_space = spaces.Box(
-            low=0, high=1, shape=(self.num_obs,), dtype=self.dtype)
+            low=0, high=2, shape=(self.num_obs,), dtype=self.dtype)
 
         ################################################################
         # Misc.
@@ -1676,8 +1658,7 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         """
         # Update the command df.
         self.gen_command_df['GenVoltSet'] = self.action_array[action, :]
-        # TODO: Use faster command.
-        self.saw.change_and_confirm_params_multiple_element(
+        self.saw.change_parameters_multiple_element_df(
             ObjectType='gen', command_df=self.gen_command_df)
 
     def _extra_reset_actions(self):
@@ -1708,3 +1689,28 @@ class Error(Exception):
 class LowVoltageError(Error):
     """Raised if any bus voltages go below MIN_V."""
     pass
+
+
+class MinLoadBelowMinGenError(Error):
+    """Raised if an environment's minimum possible load is below the
+    minimum possible generation.
+    """
+    pass
+
+
+class MaxLoadAboveMaxGenError(Error):
+    """Raised if an environment's maximum possible load is below the
+    maximum possible generation.
+    """
+
+
+class OutOfScenariosError(Error):
+    """Raised when an environment's reset() method is called to move to
+    the next episode, but there are none remaining.
+    """
+
+
+class ComputeGenMaxIterationsError(Error):
+    """Raised when generation for a given scenario/episode cannot be
+    computed within the given iteration limit.
+    """
