@@ -690,6 +690,30 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
         self.assertIsInstance(obs, np.ndarray)
         self.assertEqual(obs.shape, self.env.observation_space.shape)
 
+    def test_extra_reset_actions_called(self):
+        with patch.object(self.env, '_set_gens_for_scenario') as p:
+            self.env.reset()
+
+        p.assert_called_once()
+
+    def test_set_gens_for_scenario_called(self):
+        with patch.object(self.env, '_set_gens_for_scenario') as p:
+            self.env.reset()
+
+        p.assert_called_once()
+
+    def test_set_loads_for_scenario_called(self):
+        with patch.object(self.env, '_set_loads_for_scenario') as p:
+            self.env.reset()
+
+        p.assert_called_once()
+
+    def test_solve_and_observe_called(self):
+        with patch.object(self.env, '_solve_and_observe') as p:
+            self.env.reset()
+
+        p.assert_called_once()
+
 
 # noinspection DuplicatedCode
 class DiscreteVoltageControlEnv14BusStepTestCase(unittest.TestCase):
@@ -795,6 +819,27 @@ class DiscreteVoltageControlEnv14BusStepTestCase(unittest.TestCase):
         self.assertTrue(done)
         self.assertEqual(
             reward, self.env.rewards['action'] + self.env.rewards['fail'])
+
+    def test_compute_end_of_episode_reward_called_correctly(self):
+        with patch.object(self.env, '_solve_and_observe'):
+            with patch.object(self.env, '_compute_reward'):
+
+                # Have _check_done return True.
+                with patch.object(self.env, '_check_done',
+                                  return_value=True):
+                    with patch.object(self.env,
+                                      '_compute_end_of_episode_reward') as p1:
+                        self.env.step(1)
+
+                # Now, have _check_done return False
+                with patch.object(self.env, '_check_done',
+                                  return_value=False):
+                    with patch.object(self.env,
+                                      '_compute_end_of_episode_reward') as p2:
+                        self.env.step(1)
+
+        p1.assert_called_once()
+        self.assertEqual(p2.call_count, 0)
 
 
 # noinspection DuplicatedCode
@@ -1145,6 +1190,34 @@ class GridMindControlEnv14BusInitTestCase(unittest.TestCase):
         finally:
             self.env.saw.LoadState()
 
+    def test_action_array(self):
+        """Ensure the action array is of the correct dimension."""
+        # Check the shape.
+        self.assertEqual(self.env.action_array.shape[0],
+                         self.env.action_space.n)
+        self.assertEqual(self.env.action_array.shape[1], self.env.num_gens)
+
+        # Spot check
+        np.testing.assert_array_equal(self.env.action_array[0, :],
+                                      np.array([self.gen_voltage_range[0]] * 5)
+                                      )
+
+        np.testing.assert_array_equal(self.env.action_array[-1, :],
+                                      np.array([self.gen_voltage_range[1]] * 5)
+                                      )
+
+        a = np.array([self.gen_voltage_range[0]] * 5)
+        a[-1] = self.env.gen_bins[1]
+        np.testing.assert_array_equal(self.env.action_array[1, :], a)
+
+        b = np.array([self.gen_voltage_range[-1]] * 5)
+        b[-1] = self.env.gen_bins[-2]
+        np.testing.assert_array_equal(self.env.action_array[-2, :], b)
+
+        c = np.array([self.gen_voltage_range[0]] * 5)
+        c[-2] = self.env.gen_bins[1]
+        np.testing.assert_array_equal(self.env.action_array[5], c)
+
 
 # noinspection DuplicatedCode
 class GridMindControlEnv14BusRewardTestCase(unittest.TestCase):
@@ -1242,6 +1315,88 @@ class GridMindControlEnv14BusRewardTestCase(unittest.TestCase):
                     + self.rewards['diverged'] * 1)
         self.assertEqual(reward, expected)
 
+
+# noinspection DuplicatedCode
+class GridMindControlEnv14BusMiscTestCase(unittest.TestCase):
+    """Test a few miscellaneous aspects."""
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 1000
+        cls.max_load_factor = 1.2
+        cls.min_load_factor = 0.8
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.num_gen_voltage_bins = 5
+        cls.gen_voltage_range = (0.95, 1.05)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+
+        cls.rewards = {
+            "normal": 100,
+            "violation": -50,
+            "diverged": -100
+        }
+
+        cls.env = voltage_control_env.GridMindEnv(
+            pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
+            max_load_factor=cls.max_load_factor,
+            min_load_factor=cls.min_load_factor,
+            min_load_pf=cls.min_load_pf,
+            lead_pf_probability=cls.lead_pf_probability,
+            load_on_probability=cls.load_on_probability,
+            num_gen_voltage_bins=cls.num_gen_voltage_bins,
+            gen_voltage_range=cls.gen_voltage_range,
+            seed=cls.seed,
+            log_level=logging.INFO,
+            rewards=cls.rewards,
+            dtype=cls.dtype
+        )
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.close()
+
+    def test_reset_clears_cumulative_reward(self):
+        self.env.cumulative_reward = 10
+        self.env.reset()
+        self.assertEqual(self.env.cumulative_reward, 0)
+
+    def test_compute_failed_pf_reward(self):
+        self.assertEqual(self.env._compute_failed_pf_reward(),
+                         14 * -100)
+
+    def test_get_observation(self):
+        df = pd.DataFrame([[1., 'a'], [2., 'b']],
+                          columns=['BusPUVolt', 'bleh'])
+        with patch.object(self.env, 'bus_obs_data', df):
+            obs = self.env._get_observation()
+
+        np.testing.assert_array_equal(obs, np.array([1., 2.]))
+
+    def test_take_action_0(self):
+        self.env._take_action(0)
+        gens = self.env.saw.GetParametersMultipleElement(
+            ObjectType='gen',
+            ParamList=(self.env.gen_key_fields + ['GenVoltSet']))
+
+        np.testing.assert_allclose(gens['GenVoltSet'].to_numpy(),
+                                   self.gen_voltage_range[0])
+
+    def test_take_last_action(self):
+        self.env._take_action(self.env.action_space.n - 1)
+        gens = self.env.saw.GetParametersMultipleElement(
+            ObjectType='gen',
+            ParamList=(self.env.gen_key_fields + ['GenVoltSet']))
+
+        np.testing.assert_allclose(gens['GenVoltSet'].to_numpy(),
+                                   self.gen_voltage_range[1])
 
 if __name__ == '__main__':
     unittest.main()

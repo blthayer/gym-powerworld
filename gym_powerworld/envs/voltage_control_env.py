@@ -7,6 +7,7 @@ import logging
 from esa import SAW, PowerWorldError
 from typing import Union, Tuple, List
 from copy import deepcopy
+import itertools
 
 # When generating scenarios, we're drawing random generation to meet
 # the load. There will be some rounding error, so set a reasonable
@@ -68,6 +69,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     - _compute_reward
     - _extra_reset_actions
     - _compute_end_of_episode_reward
+    - _compute_failed_pf_reward
 
     Note that the initialization method of this class solves the power
     flow and calls the SaveState method, so subclasses may need to
@@ -647,7 +649,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             done = True
             # An action was taken, so include both the action and
             # failure penalties.
-            reward = self.rewards['fail'] + self.rewards['action']
+            reward = self._compute_failed_pf_reward()
         else:
             # The power flow successfully solved. Compute the reward
             # and check to see if this episode is done.
@@ -964,6 +966,13 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         """Subclasses should implement this method, which will, well,
         compute an end of episode reward (if desired). If not desired,
         just return 0.
+        """
+
+    @abstractmethod
+    def _compute_failed_pf_reward(self):
+        """If the power flow fails to solve (or goes into exceptionally
+        low voltages where we cannot trust the solution anymore),
+        compute the reward (penalty).
         """
 
 
@@ -1375,6 +1384,10 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         """
         return 0
 
+    def _compute_failed_pf_reward(self):
+        """Simply combine the fail and action rewards."""
+        return self.rewards['fail'] + self.rewards['action']
+
 
 # noinspection PyAbstractClass
 class GridMindEnv(DiscreteVoltageControlEnvBase):
@@ -1483,6 +1496,14 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         self.action_space = spaces.Discrete(
             num_gen_voltage_bins ** self.num_gens)
 
+        # Being lazy, just create an action array.
+        # TODO: It's silly to store this giant array in memory when you
+        #   could compute the necessary permutation given an index on
+        #   the fly.
+        self.action_array = \
+            np.array(list(itertools.product(
+                *[self.gen_bins for _ in range(self.num_gens)])
+            ))
         ################################################################
         # Observation space definition
         ################################################################
@@ -1499,6 +1520,17 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         #   is a different story.
         self.observation_space = spaces.Box(
             low=0, high=1, shape=(self.num_obs,), dtype=self.dtype)
+
+        ################################################################
+        # Misc.
+        ################################################################
+        # Create a copy of a subset of the gen data.
+        self.gen_command_df = \
+            self.gen_init_data[self.gen_key_fields].copy(deep=True)
+        self.gen_command_df['GenVoltSet'] = 0.0
+
+        # One time computation of diverged power flow reward.
+        self._failed_pf_reward = self.rewards['diverged'] * self.num_buses
 
         # All done.
 
@@ -1640,11 +1672,13 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         return self.bus_obs_data['BusPUVolt'].to_numpy(dtype=self.dtype)
 
     def _take_action(self, action: int):
-        """Select the appropriate permutation/combination of voltage
-        set points according to the given action.
+        """Send the generator set points into PowerWorld.
         """
-        # TODO
-        raise NotImplementedError()
+        # Update the command df.
+        self.gen_command_df['GenVoltSet'] = self.action_array[action, :]
+        # TODO: Use faster command.
+        self.saw.change_and_confirm_params_multiple_element(
+            ObjectType='gen', command_df=self.gen_command_df)
 
     def _extra_reset_actions(self):
         """Reset the cumulative reward."""
@@ -1654,6 +1688,16 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         """Simply cumulative reward divided by number of actions.
         """
         return self.cumulative_reward / self.action_count
+
+    def _compute_failed_pf_reward(self):
+        """Consider all buses to be in the "diverged" zone. It isn't
+        clear how this is handled by reading the paper, but this
+        seems most sensible to me (large penalty for causing the p.f.
+        to crash).
+
+        TODO: Verify this is correct.
+        """
+        return self._failed_pf_reward
 
 
 class Error(Exception):
