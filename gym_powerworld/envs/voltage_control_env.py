@@ -223,6 +223,12 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         should be given a negative sign.
         """
 
+    @property
+    @abstractmethod
+    def action_cap(self):
+        """Subclasses should define an action_cap."""
+        pass
+
     ####################################################################
     # Initialization
     ####################################################################
@@ -885,7 +891,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # If the number of actions taken in this episode has exceeded
         # a threshold, we're done.
         # TODO: Stop hard-coding number of actions
-        if self.action_count > (self.num_gens * 2):
+        if self.action_count >= self.action_cap:
             return True
 
         # If all voltages are in range, we're done.
@@ -1111,7 +1117,18 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
             low=low, high=np.concatenate((bus_high, rest_high)),
             dtype=self.dtype)
 
+        ################################################################
+        # Action cap
+        ################################################################
+        # Set the action cap to be double the number of generators.
+        # TODO: Include other controllable assets, e.g. shunts/taps
+        self._action_cap = 2 * self.num_gens
+
         # All done.
+
+    @property
+    def action_cap(self) -> int:
+        return self._action_cap
 
     def render(self, mode='human'):
         """Putting this here strictly to get PyCharm to quit
@@ -1511,10 +1528,15 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
             self.gen_init_data[self.gen_key_fields].copy(deep=True)
         self.gen_command_df['GenVoltSet'] = 0.0
 
-        # One time computation of diverged power flow reward.
-        self._failed_pf_reward = self.rewards['diverged'] * self.num_buses
+        # Cap the actions per episode at 15 (co-author said 10-20 would
+        # be fine, so split the difference).
+        self._action_cap = 15
 
         # All done.
+
+    @property
+    def action_cap(self) -> int:
+        return self._action_cap
 
     def _compute_loading(self, *args, **kwargs):
         """As far as I can tell, the GridMind loading is dead simple -
@@ -1648,8 +1670,11 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         return reward
 
     def _get_observation(self) -> np.ndarray:
-        """Zeyu thinks GridMind only used voltage magnitudes for
-        states. Let's go with that for now.
+        """After consulting with a co-author on the paper (Jiajun Duan)
+        I've confirmed that for this voltage control problem the only
+        input states are bus per unit voltage magnitudes, contrary to
+        what is listed in the paper (line flows (P and Q), bus voltages
+        (angle and magnitude)).
         """
         return self.bus_obs_data['BusPUVolt'].to_numpy(dtype=self.dtype)
 
@@ -1671,14 +1696,11 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         return self.cumulative_reward / self.action_count
 
     def _compute_failed_pf_reward(self):
-        """Consider all buses to be in the "diverged" zone. It isn't
-        clear how this is handled by reading the paper, but this
-        seems most sensible to me (large penalty for causing the p.f.
-        to crash).
-
-        TODO: Verify this is correct.
+        """After consulting with a co-author on the paper (Jiajun Duan)
+        I've confirmed that if the power flow fails to converge, they
+        simply give a single instance of the "diverged" penalty.
         """
-        return self._failed_pf_reward
+        return self.rewards['diverged']
 
 
 class Error(Exception):

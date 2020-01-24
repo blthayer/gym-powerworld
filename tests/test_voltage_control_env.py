@@ -677,7 +677,8 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
                           side_effect=PowerWorldError('failure')):
             with patch.object(self.env, 'num_scenarios', new=5):
                 with self.assertRaisesRegex(
-                        OutOfScenariosError, 'We have gone through all scenarios'):
+                        OutOfScenariosError,
+                        'We have gone through all scenarios'):
                     self.env.reset()
 
     def test_reset_returns_proper_observation(self):
@@ -1145,6 +1146,7 @@ class GridMindControlEnv14BusInitTestCase(unittest.TestCase):
         )
 
         # Ensure all loads are at or below the maximum.
+        # noinspection PyUnresolvedReferences
         self.assertTrue(
             ((np.tile(original_mw, (self.num_scenarios, 1))
               * self.max_load_factor)
@@ -1376,8 +1378,7 @@ class GridMindControlEnv14BusMiscTestCase(unittest.TestCase):
         self.assertEqual(self.env.cumulative_reward, 0)
 
     def test_compute_failed_pf_reward(self):
-        self.assertEqual(self.env._compute_failed_pf_reward(),
-                         14 * -100)
+        self.assertEqual(self.env._compute_failed_pf_reward(), -100)
 
     def test_get_observation(self):
         df = pd.DataFrame([[1., 'a'], [2., 'b']],
