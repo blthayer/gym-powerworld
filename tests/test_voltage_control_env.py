@@ -22,6 +22,9 @@ CASE_DIR = os.path.join(THIS_DIR, 'cases')
 # IEEE 14 bus
 DIR_14 = os.path.join(CASE_DIR, 'ieee_14')
 PWB_14 = os.path.join(DIR_14, 'IEEE 14 bus.pwb')
+# Case with 3 gens modeled as condensers:
+PWB_14_CONDENSERS = os.path.join(DIR_14, 'IEEE 14 bus condensers.pwb')
+
 
 # Define some constants related to the IEEE 14 bus case.
 N_GENS_14 = 5
@@ -1405,6 +1408,96 @@ class GridMindControlEnv14BusMiscTestCase(unittest.TestCase):
 
         np.testing.assert_allclose(gens['GenVoltSet'].to_numpy(),
                                    self.gen_voltage_range[1])
+
+
+# noinspection DuplicatedCode
+class GridMindControlEnv14BusCondensersTestCase(unittest.TestCase):
+    """Test the case with condensers and make sure behavior is
+    expected.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 1000
+        cls.max_load_factor = 1.2
+        cls.min_load_factor = 0.8
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.num_gen_voltage_bins = 5
+        cls.gen_voltage_range = (0.95, 1.05)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+
+        cls.rewards = {
+            "normal": 100,
+            "violation": -50,
+            "diverged": -100
+        }
+
+        cls.env = voltage_control_env.GridMindEnv(
+            pwb_path=PWB_14_CONDENSERS, num_scenarios=cls.num_scenarios,
+            max_load_factor=cls.max_load_factor,
+            min_load_factor=cls.min_load_factor,
+            min_load_pf=cls.min_load_pf,
+            lead_pf_probability=cls.lead_pf_probability,
+            load_on_probability=cls.load_on_probability,
+            num_gen_voltage_bins=cls.num_gen_voltage_bins,
+            gen_voltage_range=cls.gen_voltage_range,
+            seed=cls.seed,
+            log_level=logging.INFO,
+            rewards=cls.rewards,
+            dtype=cls.dtype
+        )
+
+    def test_generation(self):
+        """Change loading in the case, solve the power flow, and ensure
+        only two gens pick up the difference.
+        """
+        try:
+            load_copy = self.env.load_init_data.copy(deep=True)
+
+            # Increase loading.
+            load_copy['LoadSMW'] = load_copy['LoadSMW'] * 1.2
+            self.env.saw.change_and_confirm_params_multiple_element(
+                ObjectType='load', command_df=load_copy)
+
+            # Solve the power flow.
+            self.env.saw.SolvePowerFlow()
+
+            # Now get generator information.
+            gen_data = self.env.saw.GetParametersMultipleElement(
+                ObjectType='gen', ParamList=self.env.gen_init_fields
+            )
+
+            # Take the difference.
+            delta = (gen_data['GenMW']
+                     - self.env.gen_init_data['GenMW']).to_numpy()
+
+            # The generators at buses 3, 6, and 8 should a) have 0 MW
+            # and b) have 0 change in MW.
+            gen_3_6_8 = gen_data['BusNum'].isin([3, 6, 8]).to_numpy()
+
+            np.testing.assert_array_equal(
+                gen_data.loc[gen_3_6_8, 'GenMW'].to_numpy(), 0.0)
+
+            np.testing.assert_array_equal(delta[gen_3_6_8], 0.0)
+
+            # The remaining generators should take on load.
+            np.testing.assert_array_less(0, delta[~gen_3_6_8])
+
+            # All generator increases should be nearly the same. The
+            # slack will have some differences - we'll allow for 0.5%
+            # relative tolerance.
+            np.testing.assert_allclose(actual=delta[~gen_3_6_8],
+                                       desired=delta[1], rtol=0.005)
+        finally:
+            self.env.saw.LoadState()
 
 
 if __name__ == '__main__':
