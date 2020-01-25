@@ -1279,7 +1279,8 @@ class GridMindControlEnv14BusRewardTestCase(unittest.TestCase):
         cls.env.close()
 
     def setUp(self) -> None:
-        """Override the relevant observation DataFrames.
+        """Override the relevant observation DataFrames, clear the
+        cumulative reward.
         """
         # 6 buses with unity per unit voltage.
         v_df = pd.DataFrame(
@@ -1289,43 +1290,47 @@ class GridMindControlEnv14BusRewardTestCase(unittest.TestCase):
         self.env.bus_obs_data_prev = v_df.copy()
         self.env.bus_obs_data = v_df.copy()
 
+        # Clear cumulative reward.
+        self.env.cumulative_reward = 0
+
     def test_all_normal(self):
         """All buses in normal zone."""
+        self.assertEqual(0, self.env.cumulative_reward)
         reward = self.env._compute_reward()
-        self.assertEqual(reward,
-                         self.rewards['normal']
-                         * self.env.bus_obs_data.shape[0])
+        self.assertEqual(reward, self.rewards['normal'])
+        self.assertEqual(self.rewards['normal'], self.env.cumulative_reward)
 
     def test_all_diverged(self):
         """All buses in diverged zone."""
+        self.assertEqual(0, self.env.cumulative_reward)
         self.env.bus_obs_data['BusPUVolt'] = \
             np.array([0.0, 1.25, 200, 0.8, 0.5, 1.26])
 
         reward = self.env._compute_reward()
-        self.assertEqual(reward,
-                         self.rewards['diverged']
-                         * self.env.bus_obs_data.shape[0])
+        self.assertEqual(reward, self.rewards['diverged'])
+        self.assertEqual(self.rewards['diverged'], self.env.cumulative_reward)
 
     def test_all_violation(self):
         """All buses in violation zone."""
+        self.assertEqual(0, self.env.cumulative_reward)
         self.env.bus_obs_data['BusPUVolt'] = \
             np.array([0.81, 1.06, 1.249, 0.949, 0.9, 1.1])
 
         reward = self.env._compute_reward()
-        self.assertEqual(reward,
-                         self.rewards['violation']
-                         * self.env.bus_obs_data.shape[0])
+        self.assertEqual(reward, self.rewards['violation'])
+        self.assertEqual(self.rewards['violation'], self.env.cumulative_reward)
 
     def test_mixed(self):
         """Test a mixture of bus zones."""
+        self.assertEqual(0, self.env.cumulative_reward)
         self.env.bus_obs_data['BusPUVolt'] = \
             np.array([0.81, 0.79, 1., 1.02, 1.06, 1.04])
 
         reward = self.env._compute_reward()
-        expected = (self.rewards['violation'] * 2
-                    + self.rewards['normal'] * 3
-                    + self.rewards['diverged'] * 1)
-        self.assertEqual(reward, expected)
+        # The presence of any diverged buses means we should get the
+        # "diverged" reward.
+        self.assertEqual(reward, self.rewards['diverged'])
+        self.assertEqual(self.rewards['diverged'], self.env.cumulative_reward)
 
 
 # noinspection DuplicatedCode

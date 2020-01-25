@@ -1637,32 +1637,26 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         pass
 
     def _compute_reward(self):
-        """The reward structure for GridMind is pretty primitive. Simple
-        rewards/penalties for buses in particular zones.
+        """The reward structure for GridMind is pretty primitive -
+        rewards for getting all buses in the normal zone, penalties if
+        any buses are outside that zone. It would seem the notation
+        they used in the paper is incorrect/misleading - I followed up
+        with an author and found that there use of the "forall" and
+        "exists" symbols really should be interpreted as "if all" and
+        "if any."
         """
-        # Get a pointer to bus data to save typing.
-        bus = self.bus_obs_data
+        # Get voltage data.
+        v = self.bus_obs_data['BusPUVolt']
 
-        # Penalize "diverged" buses
-        reward = (
-                (
-                    (bus['BusPUVolt'] <= 0.8).sum()
-                    + (bus['BusPUVolt'] >= 1.25).sum()
-                )
-                * self.rewards['diverged'])
-
-        # Penalize "violation" buses
-        reward += (
-                ((bus['BusPUVolt'].between(0.8, 0.95, inclusive=False)).sum()
-                 + (bus['BusPUVolt'].between(1.05, 1.25,
-                                             inclusive=False)).sum()
-                 )
-                * self.rewards['violation'])
-
-        # Reward "normal" buses
-        reward += (
-                bus['BusPUVolt'].between(0.95, 1.05, inclusive=True).sum()
-                * self.rewards['normal'])
+        # Reward if all buses are in bounds.
+        if v.between(0.95, 1.05, inclusive=True).all():
+            reward = self.rewards['normal']
+        # Penalize heavily if any voltages are in the "diverged" zone.
+        elif (v <= 0.8).any() or (v >= 1.25).any():
+            reward = self.rewards['diverged']
+        # Otherwise, penalize for buses being in the "violation" zone.
+        else:
+            reward = self.rewards['violation']
 
         # Bump the cumulative reward.
         self.cumulative_reward += reward
