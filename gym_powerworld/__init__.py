@@ -9,3 +9,8 @@ register(
     id='powerworld-gridmind-env-v0',
     entry_point='gym_powerworld.envs:GridMindEnv',
 )
+
+register(
+    id='powerworld-gridmind-hard-env-v0',
+    entry_point='gym_powerworld.envs:GridMindHardEnv',
+)

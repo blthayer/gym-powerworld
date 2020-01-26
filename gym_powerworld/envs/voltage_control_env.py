@@ -55,6 +55,28 @@ PLURAL_MAP = {
 }
 
 
+def _set_gens_for_scenario_from_gen_mw(self) -> None:
+    """Set generator Open/Closed states and set Gen MW setpoints based
+    on self's "gen_mw" attribute.
+
+    :param self: An initialized child class of
+        DiscreteVoltageControlEnvBase.
+    """
+    # Extract a subset of the generator data.
+    gens = self.gen_init_data.loc[:, self.gen_key_fields
+                                  + self.GEN_RESET_FIELDS].copy()
+
+    # Turn generators on/off and set their MW set points.
+    gens.loc[:, 'GenMW'] = self.gen_mw[self.scenario_idx, :]
+    gen_g_0 = self.gen_mw[self.scenario_idx, :] > 0
+    gens.loc[gen_g_0, 'GenStatus'] = 'Closed'
+    gens.loc[~gen_g_0, 'GenStatus'] = 'Open'
+    self.saw.change_parameters_multiple_element_df('gen', gens)
+
+    # Nothing to return.
+    return None
+
+
 # noinspection PyPep8Naming
 class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     """Base class for discrete voltage control environments.
@@ -709,6 +731,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             self.saw.LoadState()
 
             # Get generators and loads set up for this scenario.
+            # noinspection PyArgumentList
             self._set_gens_for_scenario()
             self._set_loads_for_scenario()
 
@@ -1055,20 +1078,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # That's it.
         return None
 
-    def _set_gens_for_scenario(self):
-        """Helper to set up generators in the case for this
-        episode/scenario. This method should only be called by reset.
-        """
-        # Extract a subset of the generator data.
-        gens = self.gen_init_data.loc[:, self.gen_key_fields
-                                      + self.GEN_RESET_FIELDS].copy()
-
-        # Turn generators on/off and set their MW set points.
-        gens.loc[:, 'GenMW'] = self.gen_mw[self.scenario_idx, :]
-        gen_g_0 = self.gen_mw[self.scenario_idx, :] > 0
-        gens.loc[gen_g_0, 'GenStatus'] = 'Closed'
-        gens.loc[~gen_g_0, 'GenStatus'] = 'Open'
-        self.saw.change_parameters_multiple_element_df('gen', gens)
+    _set_gens_for_scenario = _set_gens_for_scenario_from_gen_mw
 
     def _set_loads_for_scenario(self):
         """Helper to set up loads in the case for this episode/scenario.
@@ -1310,6 +1320,7 @@ def _compute_loading_robust(self, load_on_probability,
         scenario_individual_loads_mvar
 
 
+# noinspection PyUnusedLocal
 def _compute_loading_gridmind(self, *args, **kwargs) -> \
         Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """As far as I can tell, the GridMind loading is dead simple -
@@ -2060,6 +2071,15 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         simply give a single instance of the "diverged" penalty.
         """
         return self.rewards['diverged']
+
+
+class GridMindHardEnv(GridMindEnv):
+    """Modified GridMind environment that uses the more difficult
+    loading and generation scenario generation.
+    """
+    _compute_loading = _compute_loading_robust
+    _compute_generation = _compute_generation_and_dispatch
+    _set_gens_for_scenario = _set_gens_for_scenario_from_gen_mw
 
 
 class Error(Exception):
