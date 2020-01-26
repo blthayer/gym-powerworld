@@ -1310,6 +1310,49 @@ def _compute_loading_robust(self, load_on_probability,
         scenario_individual_loads_mvar
 
 
+def _compute_loading_gridmind(self, *args, **kwargs) -> \
+        Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """As far as I can tell, the GridMind loading is dead simple -
+    they scale each load between 80% and 120% of original.
+
+    Here's the text from the paper:
+    "Random  load  changes  are  applied across the entire system,
+    and each load fluctuates within 80%-120% of its original value."
+
+    :param self: An initialized child class of
+        DiscreteVoltageControlEnvBase
+    """
+    # Solve the power flow for the initial case and get loading.
+    # We can't assume that the case has already been solved.
+    self.saw.SolvePowerFlow()
+    loads = self.saw.GetParametersMultipleElement(
+        ObjectType='load',
+        ParamList=(self.load_key_fields + LOAD_P)
+    )
+
+    # Define load array shape for convenience.
+    shape = (self.num_scenarios, self.num_loads)
+
+    # Randomly draw an array between the minimum load factor and
+    # maximum load factor.
+    load_factor = self.rng.uniform(
+        self.min_load_factor, self.max_load_factor, shape)
+
+    # Create arrays to hold individual load MW and Mvar loading.
+    scenario_individual_loads_mw = (
+        np.tile(loads['LoadSMW'].to_numpy(), (self.num_scenarios, 1))
+        * load_factor
+    )
+    scenario_individual_loads_mvar = (
+        np.tile(loads['LoadSMVR'].to_numpy(), (self.num_scenarios, 1))
+        * load_factor
+    )
+
+    # Return.
+    return scenario_individual_loads_mw.sum(axis=1),\
+        scenario_individual_loads_mw, scenario_individual_loads_mvar
+
+
 def _compute_generation_and_dispatch(self) -> np.ndarray:
     """
     Drop in replacement for _compute_generation in child classes of
@@ -1422,6 +1465,63 @@ def _compute_generation_and_dispatch(self) -> np.ndarray:
                        f'scenario {scenario_idx}')
 
     return scenario_gen_mw
+
+
+def _compute_generation_gridmind(self) -> None:
+    """Here's the relevant text from the paper:
+
+    "When loads change, generators are re-dispatched based on a
+    participation factor list to maintain system power balance."
+
+    I have to assume that the participation factor list is fixed,
+    but maybe it isn't?
+
+    The simplest approach here is to simply use PowerWorld to
+    enforce participation factors. Several steps are required:
+    - Turn on participation factor AGC for the area
+    - Set AGC tolerance to be low (say 0.01MW) for the area
+    - Turn on AGC for all generators
+    - Set participation factor for all generators based on their
+        MW rating.
+
+    :param self: An initialized child class of
+        DiscreteVoltageControlEnvBase.
+    """
+    # Start by getting data for areas.
+    area_kf = self.saw.get_key_field_list(ObjectType='area')
+    areas = self.saw.GetParametersMultipleElement(
+        ObjectType='area',
+        ParamList=(area_kf + ['ConvergenceTol', 'BGAGC']))
+
+    # Put the a areas in participation factor AGC with a small
+    # tolerance.
+    areas['ConvergenceTol'] = 0.01
+    areas['BGAGC'] = 'Part. AGC'
+    self.saw.change_and_confirm_params_multiple_element(
+        ObjectType='area', command_df=areas)
+
+    # Get data for generators.
+    gens = self.saw.GetParametersMultipleElement(
+        ObjectType='gen',
+        ParamList=(self.gen_key_fields
+                   + ['GenAGCAble', 'GenEnforceMWLimits'])
+    )
+
+    # Make all generators AGCAble and ensure MW limits are followed.
+    # TODO: Need exceptions for wind and other non-dispatchable
+    #  resources
+    gens['GenAGCAble'] = 'YES'
+    gens['GenEnforceMWLimits'] = 'YES'
+    self.saw.change_and_confirm_params_multiple_element(
+        ObjectType='gen', command_df=gens
+    )
+
+    # Set participation factors for all generators in the system.
+    self.saw.RunScriptCommand(
+        'SetParticipationFactors(MAXMWRAT, 0, SYSTEM);')
+
+    # Nothing to return.
+    return None
 
 
 def _compute_reward_based_on_movement(self) -> float:
@@ -1891,96 +1991,8 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
     def action_cap(self) -> int:
         return self._action_cap
 
-    def _compute_loading(self, *args, **kwargs):
-        """As far as I can tell, the GridMind loading is dead simple -
-        they scale each load between 80% and 120% of original.
-
-        Here's the text from the paper:
-        "Random  load  changes  are  applied across the entire system,
-        and each load fluctuates within 80%-120% of its original value."
-        """
-        # Solve the power flow for the initial case and get loading.
-        # We can't assume that the case has already been solved.
-        self.saw.SolvePowerFlow()
-        loads = self.saw.GetParametersMultipleElement(
-            ObjectType='load',
-            ParamList=(self.load_key_fields + LOAD_P)
-        )
-
-        # Define load array shape for convenience.
-        shape = (self.num_scenarios, self.num_loads)
-
-        # Randomly draw an array between the minimum load factor and
-        # maximum load factor.
-        load_factor = self.rng.uniform(
-            self.min_load_factor, self.max_load_factor, shape)
-
-        # Create arrays to hold individual load MW and Mvar loading.
-        scenario_individual_loads_mw = (
-            np.tile(loads['LoadSMW'].to_numpy(), (self.num_scenarios, 1))
-            * load_factor
-        )
-        scenario_individual_loads_mvar = (
-            np.tile(loads['LoadSMVR'].to_numpy(), (self.num_scenarios, 1))
-            * load_factor
-        )
-
-        # Return.
-        return scenario_individual_loads_mw.sum(axis=1),\
-            scenario_individual_loads_mw, scenario_individual_loads_mvar
-
-    def _compute_generation(self):
-        """Here's the relevant text from the paper:
-
-        "When loads change, generators are re-dispatched based on a
-        participation factor list to maintain system power balance."
-
-        I have to assume that the participation factor list is fixed,
-        but maybe it isn't?
-
-        The simplest approach here is to simply use PowerWorld to
-        enforce participation factors. Several steps are required:
-        - Turn on participation factor AGC for the area
-        - Set AGC tolerance to be low (say 0.01MW) for the area
-        - Turn on AGC for all generators
-        - Set participation factor for all generators based on their
-            MW rating.
-        """
-        # Start by getting data for areas.
-        area_kf = self.saw.get_key_field_list(ObjectType='area')
-        areas = self.saw.GetParametersMultipleElement(
-            ObjectType='area',
-            ParamList=(area_kf + ['ConvergenceTol', 'BGAGC']))
-
-        # Put the a areas in participation factor AGC with a small
-        # tolerance.
-        areas['ConvergenceTol'] = 0.01
-        areas['BGAGC'] = 'Part. AGC'
-        self.saw.change_and_confirm_params_multiple_element(
-            ObjectType='area', command_df=areas)
-
-        # Get data for generators.
-        gens = self.saw.GetParametersMultipleElement(
-            ObjectType='gen',
-            ParamList=(self.gen_key_fields
-                       + ['GenAGCAble', 'GenEnforceMWLimits'])
-        )
-
-        # Make all generators AGCAble and ensure MW limits are followed.
-        # TODO: Need exceptions for wind and other non-dispatchable
-        #  resources
-        gens['GenAGCAble'] = 'YES'
-        gens['GenEnforceMWLimits'] = 'YES'
-        self.saw.change_and_confirm_params_multiple_element(
-            ObjectType='gen', command_df=gens
-        )
-
-        # Set participation factors for all generators in the system.
-        self.saw.RunScriptCommand(
-            'SetParticipationFactors(MAXMWRAT, 0, SYSTEM);')
-
-        # Nothing to return.
-        return None
+    _compute_loading = _compute_loading_gridmind
+    _compute_generation = _compute_generation_gridmind
 
     def _set_gens_for_scenario(self):
         """Since we're using PowerWorld's participation factor AGC to
