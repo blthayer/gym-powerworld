@@ -56,6 +56,7 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
         cls.seed = 18
         cls.log_level = logging.INFO
         cls.dtype = np.float32
+        cls.log_buffer = 100
 
         cls.env = voltage_control_env.DiscreteVoltageControlEnv(
             pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
@@ -68,7 +69,8 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
             gen_voltage_range=cls.gen_voltage_range,
             seed=cls.seed,
             log_level=logging.INFO,
-            dtype=cls.dtype
+            dtype=cls.dtype,
+            log_buffer=cls.log_buffer
         )
 
         # For easy comparison with the original case, get a fresh SAW
@@ -448,6 +450,18 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
                 min_load_factor=self.min_load_factor,
                 rewards={'v_detla': 1000})
 
+    def test_log_columns(self):
+        """Ensure the log columns are as they should be."""
+        self.assertListEqual(
+            ['episode', 'action_taken', 'reward']
+            + [f'bus_{x+1}_v' for x in range(14)], self.env.log_columns
+        )
+
+    def test_log_array(self):
+        self.assertEqual(self.env.log_array.shape,
+                         # 14 + 3 --> num buses plus ep, action, reward
+                         (self.log_buffer, 14 + 3))
+
 
 # noinspection DuplicatedCode
 class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
@@ -728,6 +742,11 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
             self.env.reset()
 
         p.assert_called_once()
+
+    def test_current_reward_cleared(self):
+        self.env.current_reward = 10
+        self.env.reset()
+        self.assertTrue(np.isnan(self.env.current_reward))
 
 
 # noinspection DuplicatedCode
@@ -1540,6 +1559,7 @@ class GridMindControlEnv14BusRenderTestCase(unittest.TestCase):
             "diverged": -100
         }
 
+        # noinspection PyTypeChecker
         cls.env = voltage_control_env.GridMindEnv(
             pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
             max_load_factor=cls.max_load_factor,
@@ -1606,6 +1626,172 @@ class GridMindControlEnv14BusRenderTestCase(unittest.TestCase):
             files = self._get_files_in_image_dir()
             self.assertEqual(len(files), i+2)
 
+
+# noinspection DuplicatedCode
+class GridMindControlEnv14BusLoggingTestCase(unittest.TestCase):
+    """Test that the logging is working as it should.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 1000
+        cls.max_load_factor = 1.2
+        cls.min_load_factor = 0.8
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.num_gen_voltage_bins = 5
+        cls.gen_voltage_range = (0.95, 1.05)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+        cls.log_buffer = 10
+        cls.csv_logfile = 'log.csv'
+
+        # Ensure we remove the logfile if it was created by other
+        # test cases.
+        try:
+            os.remove(cls.csv_logfile)
+        except FileNotFoundError:
+            pass
+
+        cls.rewards = {
+            "normal": 100,
+            "violation": -50,
+            "diverged": -100
+        }
+
+        cls.env = voltage_control_env.GridMindEnv(
+            pwb_path=PWB_14_CONDENSERS, num_scenarios=cls.num_scenarios,
+            max_load_factor=cls.max_load_factor,
+            min_load_factor=cls.min_load_factor,
+            min_load_pf=cls.min_load_pf,
+            lead_pf_probability=cls.lead_pf_probability,
+            load_on_probability=cls.load_on_probability,
+            num_gen_voltage_bins=cls.num_gen_voltage_bins,
+            gen_voltage_range=cls.gen_voltage_range,
+            seed=cls.seed,
+            log_level=logging.INFO,
+            rewards=cls.rewards,
+            dtype=cls.dtype,
+            log_buffer=cls.log_buffer,
+            csv_logfile=cls.csv_logfile
+        )
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.close()
+
+    def test_log(self):
+        """Step through some training-like steps and ensure the logging
+        works as expected.
+        """
+        # Ensure the log array starts empty.
+        zeros = np.zeros((self.log_buffer, 14 + 3))
+        np.testing.assert_array_equal(zeros, self.env.log_array)
+
+        # Calling reset should create a log entry.
+        self.env.reset()
+
+        entry_1 = self.env.log_array[0, :]
+        # Episode:
+        self.assertEqual(entry_1[0], 0)
+        # Action:
+        self.assertTrue(np.isnan(entry_1[1]))
+        # Reward:
+        self.assertTrue(np.isnan(entry_1[2]))
+        np.testing.assert_array_equal(
+            zeros[1:, :], self.env.log_array[1:, :])
+
+        # We haven't hit the "buffer" limit yet.
+        self.assertEqual(0, self.env.log_flush_count)
+        self.assertFalse(os.path.isfile(self.env.csv_logfile))
+
+        # If we run 9 actions, we should hit the buffer.
+        actions = [500 + x for x in range(9)]
+        for a in actions:
+            self.env.step(a)
+
+        # The log should have been flushed.
+        self.assertEqual(1, self.env.log_flush_count)
+        self.assertTrue(os.path.isfile(self.env.csv_logfile))
+
+        # The log index should have been reset.
+        self.assertEqual(0, self.env.log_idx)
+
+        # Read the log file.
+        log_data = pd.read_csv(self.env.csv_logfile, index_col=None)
+
+        # Columns should line up.
+        self.assertListEqual(log_data.columns.tolist(), self.env.log_columns)
+
+        # There should be the same number of entries as our "buffer"
+        # size.
+        self.assertEqual(log_data.shape[0], self.env.log_buffer)
+
+        # Ensure the episode number is 0 for all rows.
+        self.assertTrue((log_data['episode'] == 0).all())
+
+        # First action should be NaN, while the rest should line up
+        # with our action list.
+        self.assertTrue(np.isnan(log_data['action_taken'].to_numpy()[0]))
+        np.testing.assert_array_equal(
+            np.array(actions), log_data['action_taken'].to_numpy()[1:])
+
+        # First reward should be NaN, while the rest should not.
+        self.assertTrue(np.isnan(log_data['reward'].to_numpy()[0]))
+        self.assertFalse(np.isnan(log_data['reward'].to_numpy()[1:]).any())
+
+        # Bus voltages should be greater than 0.
+        bus_cols = log_data.columns.to_numpy()[
+            log_data.columns.str.startswith('bus_')]
+        self.assertEqual((14,), bus_cols.shape)
+        self.assertTrue((log_data[bus_cols].to_numpy() > 0).all())
+
+        # Reset the environment and take another set of actions that
+        # will cause the buffer to flush.
+        self.env.reset()
+
+        # If we run 9 actions, we should hit the buffer.
+        actions = [600 + x for x in range(9)]
+        for a in actions:
+            self.env.step(a)
+
+        # The log should have been flushed for the 2nd time.
+        self.assertEqual(2, self.env.log_flush_count)
+        self.assertTrue(os.path.isfile(self.env.csv_logfile))
+
+        # The log index should have been reset.
+        self.assertEqual(0, self.env.log_idx)
+
+        # Read the log file.
+        log_data = pd.read_csv(self.env.csv_logfile, index_col=None)
+
+        # Columns should line up.
+        self.assertListEqual(log_data.columns.tolist(), self.env.log_columns)
+
+        # Should now have 2x buffer size entries.
+        self.assertEqual(log_data.shape[0], 2 * self.env.log_buffer)
+
+        # Perform a reset and run two actions.
+        self.env.reset()
+        self.env.step(1502)
+        self.env.step(1242)
+
+        # Manually flush the log.
+        self.env._flush_log()
+
+        # Now we should get three more rows.
+        log_data = pd.read_csv(self.env.csv_logfile, index_col=None)
+        self.assertEqual(log_data.shape[0], 2 * self.env.log_buffer + 3)
+        # If the last row is 0's then the indexing is bad.
+        self.assertFalse(np.array_equal(
+            np.zeros(log_data.shape[1]), log_data.to_numpy()[-1, :]))
 
 
 if __name__ == '__main__':

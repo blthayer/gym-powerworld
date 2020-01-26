@@ -254,7 +254,9 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                  oneline_axd: str = None,
                  contour_axd: str = None,
                  image_dir: str = None,
-                 render_interval: float = 1.0):
+                 render_interval: float = 1.0,
+                 log_buffer: int = 10000,
+                 csv_logfile: str = 'log.csv'):
         """Initialize the environment. Pull data needed up front,
         create gen/loading cases, perform case checks, etc.
 
@@ -333,6 +335,10 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             displaying the oneline and voltage contours after a call
             to reset() or step(). Must be > 0 in order for rendering
             to work.
+        :param log_buffer: How many log entries to hold before flushing
+            to file.
+        :param csv_logfile: Path to .csv file which will be used to
+            log states/actions.
         """
         ################################################################
         # Logging, seeding, SAW initialization, simple attributes
@@ -363,6 +369,10 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Track low and high v.
         self.low_v = low_v
         self.high_v = high_v
+
+        # Logging.
+        self.log_buffer = log_buffer
+        self.csv_logfile = csv_logfile
 
         ################################################################
         # Rendering related stuff
@@ -579,11 +589,29 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         ################################################################
         self.rewards = deepcopy(self.REWARDS)
         self._overwrite_rewards(rewards)
-        self.current_reward = None
+        self.current_reward = np.nan
 
         ################################################################
-        # Misc.
+        # Action/State logging
         ################################################################
+        # Initialize logging columns.
+        # Start by retrieving a list of bus numbers.
+        buses = self.saw.GetParametersMultipleElement(
+            'bus', self.bus_key_fields)
+        # Log episode #, action taken, and all bus voltages
+        self.log_columns = \
+            ['episode', 'action_taken', 'reward'] \
+            + [f'bus_{n}_v' for n in buses['BusNum'].tolist()]
+
+        # Initialize the logging array.
+        self.log_array = np.zeros((self.log_buffer, len(self.log_columns)))
+
+        # Keep track of the index of the logging array.
+        self.log_idx = 0
+
+        # For purposes of appending/writing headers, track how many
+        # times we've flushed.
+        self.log_flush_count = 0
 
         ################################################################
         # Solve power flow, save state.
@@ -670,6 +698,9 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Reset the action counter.
         self.action_count = 0
 
+        # Clear the current reward.
+        self.current_reward = np.nan
+
         done = False
 
         while (not done) & (self.scenario_idx < self.num_scenarios):
@@ -696,6 +727,9 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             finally:
                 # Always increment the scenario index.
                 self.scenario_idx += 1
+
+        # Log. Since no action was taken, pass NaN.
+        self._add_to_log(action=np.nan)
 
         # Raise exception if we've gone through all the scenarios.
         if self.scenario_idx >= self.num_scenarios:
@@ -738,14 +772,18 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Update current reward.
         self.current_reward = reward
 
+        # Always log.
+        self._add_to_log(action=action)
+
         # TODO: update the fourth return (info) to, you know, actually
         #   give info.
         # That's it.
         return obs, reward, done, dict()
 
     def close(self):
-        """Tear down SimAuto wrapper."""
+        """Tear down SimAuto wrapper, flush the log."""
         self.saw.exit()
+        self._flush_log()
 
     ####################################################################
     # Private methods
@@ -1062,6 +1100,56 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Otherwise, we're not done.
         return False
 
+    def _flush_log(self):
+        """Helper to flush the log to file."""
+        # Create DataFrame with logging data. Need to handle ending
+        # indices differently for if we're flushing the whole array
+        # or a subset of it.
+        if self.log_idx == self.log_buffer:
+            idx = self.log_idx+1
+        else:
+            idx = self.log_idx
+
+        df = pd.DataFrame(self.log_array[0:idx],
+                          columns=self.log_columns)
+
+        # If this is our first flush, we need to use writing mode and
+        # include the headers.
+        if self.log_flush_count == 0:
+            df.to_csv(self.csv_logfile, mode='w', index=False, header=True)
+        else:
+            # Append.
+            df.to_csv(self.csv_logfile, mode='a', index=False, header=False)
+
+        # Increase the flush count.
+        self.log_flush_count += 1
+
+        # Clear the logging array.
+        self.log_array[:, :] = 0.0
+
+        # Reset the log index.
+        self.log_idx = 0
+
+    def _add_to_log(self, action):
+        """Helper to add data to the log and flush if necessary."""
+        # Logging occurs after the scenario index is bumped, so
+        # subtract 1.
+        self.log_array[self.log_idx, 0] = self.scenario_idx - 1
+        # Action.
+        self.log_array[self.log_idx, 1] = action
+        # Reward.
+        self.log_array[self.log_idx, 2] = self.current_reward
+        # Data.
+        self.log_array[self.log_idx, 3:] = \
+            self.bus_obs_data['BusPUVolt'].to_numpy()
+
+        # Increment the log index.
+        self.log_idx += 1
+
+        # Flush if necessary.
+        if self.log_idx == self.log_buffer:
+            self._flush_log()
+
     ####################################################################
     # Abstract methods
     ####################################################################
@@ -1207,7 +1295,9 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
                  oneline_axd: str = None,
                  contour_axd: str = None,
                  image_dir: str = None,
-                 render_interval: int = 1
+                 render_interval: int = 1,
+                 log_buffer: int = 10000,
+                 csv_logfile: str = 'log.csv'
                  ):
         """See parent class for parameter definitions.
         """
@@ -1224,7 +1314,8 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
             seed=seed, log_level=log_level, rewards=rewards,
             dtype=dtype, low_v=low_v, high_v=high_v, oneline_axd=oneline_axd,
             contour_axd=contour_axd, image_dir=image_dir,
-            render_interval=render_interval
+            render_interval=render_interval, log_buffer=log_buffer,
+            csv_logfile=csv_logfile
         )
 
         ################################################################
@@ -1635,7 +1726,9 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
                  oneline_axd: str = None,
                  contour_axd: str = None,
                  image_dir: str = None,
-                 render_interval: int = 1
+                 render_interval: int = 1,
+                 log_buffer: int = 10000,
+                 csv_logfile: str = 'log.csv'
                  ):
         """See parent class for parameter descriptions.
         """
@@ -1660,7 +1753,8 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
             seed=seed, log_level=log_level, rewards=rewards,
             dtype=dtype, low_v=low_v, high_v=high_v, oneline_axd=oneline_axd,
             contour_axd=contour_axd, image_dir=image_dir,
-            render_interval=render_interval
+            render_interval=render_interval, log_buffer=log_buffer,
+            csv_logfile=csv_logfile
         )
 
         ################################################################
