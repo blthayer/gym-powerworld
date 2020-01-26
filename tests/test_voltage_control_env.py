@@ -12,6 +12,7 @@ import logging
 import warnings
 from esa import SAW, PowerWorldError
 from gym.spaces import Discrete
+import shutil
 
 # Get full path to this directory.
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -22,6 +23,9 @@ CASE_DIR = os.path.join(THIS_DIR, 'cases')
 # IEEE 14 bus
 DIR_14 = os.path.join(CASE_DIR, 'ieee_14')
 PWB_14 = os.path.join(DIR_14, 'IEEE 14 bus.pwb')
+AXD_14 = os.path.join(DIR_14, 'IEEE 14 bus.axd')
+CONTOUR = os.path.join(DIR_14, 'contour.axd')
+
 # Case with 3 gens modeled as condensers:
 PWB_14_CONDENSERS = os.path.join(DIR_14, 'IEEE 14 bus condensers.pwb')
 
@@ -1503,6 +1507,105 @@ class GridMindControlEnv14BusCondensersTestCase(unittest.TestCase):
                                        desired=delta[1], rtol=0.005)
         finally:
             self.env.saw.LoadState()
+
+
+# noinspection DuplicatedCode
+class GridMindControlEnv14BusRenderTestCase(unittest.TestCase):
+    """Test rendering."""
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 1000
+        cls.max_load_factor = 1.2
+        cls.min_load_factor = 0.8
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.num_gen_voltage_bins = 5
+        cls.gen_voltage_range = (0.95, 1.05)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+        cls.oneline_axd = AXD_14
+        cls.contour_axd = CONTOUR
+        cls.image_dir = os.path.join(THIS_DIR, 'render_dir')
+        cls.render_interval = 0.1
+
+        cls.rewards = {
+            "normal": 100,
+            "violation": -50,
+            "diverged": -100
+        }
+
+        cls.env = voltage_control_env.GridMindEnv(
+            pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
+            max_load_factor=cls.max_load_factor,
+            min_load_factor=cls.min_load_factor,
+            min_load_pf=cls.min_load_pf,
+            lead_pf_probability=cls.lead_pf_probability,
+            load_on_probability=cls.load_on_probability,
+            num_gen_voltage_bins=cls.num_gen_voltage_bins,
+            gen_voltage_range=cls.gen_voltage_range,
+            seed=cls.seed,
+            log_level=logging.INFO,
+            rewards=cls.rewards,
+            dtype=cls.dtype,
+            oneline_axd=cls.oneline_axd, contour_axd=cls.contour_axd,
+            image_dir=cls.image_dir, render_interval=cls.render_interval
+        )
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.close()
+        shutil.rmtree(cls.image_dir)
+
+    def _get_files_in_image_dir(self):
+        # https://stackoverflow.com/a/3207973/11052174
+        return [f for f in os.listdir(self.env.image_dir)
+                if os.path.isfile(os.path.join(self.env.image_dir, f))]
+
+    def test_rendering(self):
+        # Before render has been called, several attributes should be
+        # None.
+        self.assertIsNone(self.env.image_path)
+        self.assertIsNone(self.env.image)
+        self.assertIsNone(self.env.image_axis)
+        self.assertIsNone(self.env.fig)
+        self.assertIsNone(self.env.ax)
+
+        # The render flag should be False.
+        self.assertFalse(self.env._render_flag)
+
+        # Reset should be called before render.
+        self.env.reset()
+
+        # Render flag should still be False.
+        self.assertFalse(self.env._render_flag)
+
+        # Calling render should initialize all sorts of stuff.
+        self.env.render()
+        self.assertIsNotNone(self.env.image_path)
+        self.assertIsNotNone(self.env.image)
+        self.assertIsNotNone(self.env.image_axis)
+        self.assertIsNotNone(self.env.fig)
+        self.assertIsNotNone(self.env.ax)
+
+        # We should have one file in our image directory.
+        files = self._get_files_in_image_dir()
+        self.assertEqual(len(files), 1)
+
+        # Take a couple steps and render each time.
+        for i in range(2):
+            self.env.step(self.env.action_space.sample())
+            self.env.render()
+
+            files = self._get_files_in_image_dir()
+            self.assertEqual(len(files), i+2)
+
 
 
 if __name__ == '__main__':

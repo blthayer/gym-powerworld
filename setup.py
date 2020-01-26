@@ -40,6 +40,8 @@ setup(name='gym_powerworld',
             'gym',
             'numpy',
             'pandas >= 0.24',
-            'esa'
+            'esa',
+            'pillow',
+            'matplotlib'
       ]
 )

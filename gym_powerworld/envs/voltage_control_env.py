@@ -8,6 +8,10 @@ from esa import SAW, PowerWorldError
 from typing import Union, Tuple, List
 from copy import deepcopy
 import itertools
+import os
+import matplotlib.pyplot as plt
+from matplotlib.image import AxesImage
+from PIL import Image
 
 # When generating scenarios, we're drawing random generation to meet
 # the load. There will be some rounding error, so set a reasonable
@@ -246,7 +250,11 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                  rewards: Union[dict, None] = None,
                  dtype=np.float32,
                  low_v: float = LOW_V,
-                 high_v: float = HIGH_V):
+                 high_v: float = HIGH_V,
+                 oneline_axd: str = None,
+                 contour_axd: str = None,
+                 image_dir: str = None,
+                 render_interval: float = 1.0):
         """Initialize the environment. Pull data needed up front,
         create gen/loading cases, perform case checks, etc.
 
@@ -306,6 +314,25 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         :param high_v: high end of voltage range that is considered
             acceptable (inclusive). Defaults to HIGH_V constant, which
             at the time of writing was 1.05 p.u.
+        :param oneline_axd: Full path to PowerWorld oneline file (.axd).
+            This is required if using the "render" function. This should
+            be created AFTER contours have been added to the oneline.
+            Simply click "File" -> "Save Oneline As" and then save as
+            the .axd type.
+        :param contour_axd: Full path to PowerWorld .axd file used for
+            adding voltage contours. This is required if using the
+            "render" function. Create this file by going to "Onelines",
+            clicking on "Contouring," and then clicking on "Contouring"
+            in the drop down. Configure the contour, and then click
+            "Save to AXD..."
+        :param image_dir: Full path to directory to store images for
+            rendering. If not provided (None) and the "render" method is
+            called, a directory called "render_images" will be created
+            in the current directory.
+        :param render_interval: Interval in seconds to pause while
+            displaying the oneline and voltage contours after a call
+            to reset() or step(). Must be > 0 in order for rendering
+            to work.
         """
         ################################################################
         # Logging, seeding, SAW initialization, simple attributes
@@ -336,6 +363,37 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Track low and high v.
         self.low_v = low_v
         self.high_v = high_v
+
+        ################################################################
+        # Rendering related stuff
+        ################################################################
+        # Track pwd and axd files.
+        self.oneline_axd = oneline_axd
+        self.contour_axd = contour_axd
+
+        # For rendering, we'll simply call the oneline "my oneline"
+        self.oneline_name = 'my oneline'
+
+        # Image directory:
+        if image_dir is None:
+            self.image_dir = 'render_images'
+        else:
+            self.image_dir = image_dir
+
+        # Current image to render.
+        self.image_path: Union[str, None] = None
+        self.image: Union[Image.Image, None] = None
+        self.image_axis: Union[AxesImage, None] = None
+
+        # Matplotlib stuff.
+        self.fig: Union[plt.Figure, None] = None
+        self.ax: Union[plt.axes.Axes, None] = None
+
+        self.render_interval = render_interval
+
+        # Initialize the _render_flag property to False. It'll be
+        # flipped when "render" is called.
+        self._render_flag = False
 
         ################################################################
         # Initialize PowerWorld related attributes, get data from case
@@ -521,6 +579,11 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         ################################################################
         self.rewards = deepcopy(self.REWARDS)
         self._overwrite_rewards(rewards)
+        self.current_reward = None
+
+        ################################################################
+        # Misc.
+        ################################################################
 
         ################################################################
         # Solve power flow, save state.
@@ -576,13 +639,24 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     ####################################################################
 
     def render(self, mode='human'):
-        """Not planning to implement this for now. However, it could
-        make for some nice graphics/presentations related to learning.
-
-        Also, PowerWorld does have the option to show the one line, so
-        this could be interesting down the line.
+        """The rendering here is quite primitive due to limitations in
+        interacting with PowerWorld's oneline diagrams via SimAuto.
+        The general flow looks like this:
+        - Open the oneline .axd file (once only).
+        - Open the contour .axd file (each time).
+        - Export oneline to image file (.bmp in this case).
+        - Use pillow/PIL to load the image.
+        - Use matplotlib to display the image.
         """
-        raise NotImplementedError
+        # Configure if necessary.
+        if not self._render_flag:
+            self._render_config()
+
+        # Toggle the render flag to True.
+        self._render_flag = True
+
+        # Render.
+        self._render()
 
     def reset(self):
         """Advance to the next episode/scenario. To do so, generators
@@ -661,6 +735,9 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         if done:
             reward += self._compute_end_of_episode_reward()
 
+        # Update current reward.
+        self.current_reward = reward
+
         # TODO: update the fourth return (info) to, you know, actually
         #   give info.
         # That's it.
@@ -673,6 +750,90 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     ####################################################################
     # Private methods
     ####################################################################
+    def _render_config(self):
+        """Helper to perform rendering configuration."""
+        # If either pwd or axd are None, we can't render.
+        if (self.oneline_axd is None) or (self.contour_axd is None):
+            self.log.error('Cannot render without providing the "oneline_axd" '
+                           'and "contour_axd" parameters during environment '
+                           'initialization. Rendering will not occur.')
+            return
+
+        # Do some matplotlib configuration. The ion() call will put it
+        # in interactive mode, which will allow us to show figures
+        # without blocking, and show() will kick of the "showing."
+        plt.ion()
+        plt.show()
+        plt.axis('off')
+
+        # Initialize figure and axes.
+        self.fig, self.ax = plt.subplots(frameon=False)
+
+        # Make the figure full screen.
+        self.fig.canvas.manager.full_screen_toggle()
+
+        # Turn off axis.
+        self.ax.set_axis_off()
+
+        # Open the oneline.
+        self.saw.RunScriptCommand(
+            fr'LoadAXD("{self.oneline_axd}", "{self.oneline_name}");')
+
+        # Create the image directory.
+        try:
+            os.mkdir(self.image_dir)
+        except FileExistsError:
+            self.log.warning(f'The directory {self.image_dir} already exists. '
+                             'Existing images will be overwritten.')
+
+    def _render(self):
+        """Do the work of rendering."""
+        # Load the contour AXD file to update the contours.
+        self.saw.RunScriptCommand(
+            fr'LoadAXD("{self.contour_axd}", "{self.oneline_name}");')
+
+        # Create the file name.
+        # Note that we're using .bmp files. This is because in some
+        # testing, I found that PowerWorld is actually fastest at
+        # writing out BMP files, despite their larger file size. While
+        # it does take Pillow ~1.5x longer to read BMP than JPG, the
+        # writing times are much longer than the reading times, so the
+        # trade off is worth it. Also note that Pillow is waaaaay faster
+        # at loading both BMPs and JPGs than cv2 (provided by
+        # the opencv-python package).
+        self.image_path = os.path.join(
+            self.image_dir,
+            f'episode_{self.scenario_idx}_action_{self.action_count}.bmp')
+
+        # Save to file. Arguments:
+        # "filename", "OnelineName", ImageType, "view", FullScreen,
+        # ShowFull
+        self.saw.RunScriptCommand(
+            fr'ExportOneline("{self.image_path}", "{self.oneline_name}", BMP, '
+            + r'"", YES, YES)'
+        )
+
+        # Load up the image.
+        self.image = Image.open(self.image_path)
+
+        # Display the image.
+        if self.image_axis is None:
+            self.image_axis = self.ax.imshow(self.image)
+        else:
+            self.image_axis.set_data(self.image)
+
+        # Add text.
+        txt = (f'Episode: {self.scenario_idx}, Action Count: '
+               f'{self.action_count}\nCurrent Reward: {self.current_reward}')
+        self.ax.text(
+            0.1, 0.9, txt, color='black',
+            bbox=dict(facecolor='white', edgecolor='black'))
+
+        # Redraw and pause.
+        # Do we want/need to tighten the layout?
+        # plt.tight_layout()
+        plt.draw()
+        plt.pause(self.render_interval)
 
     def _fill_init_attributes(self):
         """Helper to loop and set attributes for gens, loads, buses,
@@ -1042,7 +1203,12 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
                  seed: float = None,
                  log_level=logging.INFO,
                  rewards: Union[dict, None] = None,
-                 dtype=np.float32, low_v=LOW_V, high_v=HIGH_V):
+                 dtype=np.float32, low_v=LOW_V, high_v=HIGH_V,
+                 oneline_axd: str = None,
+                 contour_axd: str = None,
+                 image_dir: str = None,
+                 render_interval: int = 1
+                 ):
         """See parent class for parameter definitions.
         """
 
@@ -1056,7 +1222,10 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
             num_gen_voltage_bins=num_gen_voltage_bins,
             gen_voltage_range=gen_voltage_range,
             seed=seed, log_level=log_level, rewards=rewards,
-            dtype=dtype, low_v=low_v, high_v=high_v)
+            dtype=dtype, low_v=low_v, high_v=high_v, oneline_axd=oneline_axd,
+            contour_axd=contour_axd, image_dir=image_dir,
+            render_interval=render_interval
+        )
 
         ################################################################
         # Action space definition
@@ -1129,12 +1298,6 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     @property
     def action_cap(self) -> int:
         return self._action_cap
-
-    def render(self, mode='human'):
-        """Putting this here strictly to get PyCharm to quit
-        complaining about unimplemented abstract methods. I don't want
-        to completely suppress the warning, though."""
-        raise NotImplementedError
 
     def _compute_loading(self, load_on_probability,
                          min_load_pf, lead_pf_probability):
@@ -1468,7 +1631,12 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
                  seed: float = None,
                  log_level=logging.INFO,
                  rewards: Union[dict, None] = None,
-                 dtype=np.float32, low_v=LOW_V, high_v=HIGH_V):
+                 dtype=np.float32, low_v=LOW_V, high_v=HIGH_V,
+                 oneline_axd: str = None,
+                 contour_axd: str = None,
+                 image_dir: str = None,
+                 render_interval: int = 1
+                 ):
         """See parent class for parameter descriptions.
         """
         # We'll hang onto the max_load_factor and min_load_factor
@@ -1490,7 +1658,10 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
             num_gen_voltage_bins=num_gen_voltage_bins,
             gen_voltage_range=gen_voltage_range,
             seed=seed, log_level=log_level, rewards=rewards,
-            dtype=dtype, low_v=low_v, high_v=high_v)
+            dtype=dtype, low_v=low_v, high_v=high_v, oneline_axd=oneline_axd,
+            contour_axd=contour_axd, image_dir=image_dir,
+            render_interval=render_interval
+        )
 
         ################################################################
         # Action space definition
