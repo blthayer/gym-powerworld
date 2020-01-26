@@ -1218,6 +1218,289 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         """
 
 
+def _compute_loading_robust(self, load_on_probability,
+                            min_load_pf, lead_pf_probability) -> \
+        Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    "Robust" computation of loading, can be used as a drop-in for the
+    _compute_loading method of child classes of
+    DiscreteVoltageControlEnvBase.
+
+    1. Randomly draw total loading between min and max
+
+    2. Randomly draw which loads are on or off based on the
+    load_on_probability
+
+    3. Draw load levels for "on" loads from the uniform distribution,
+    scale each scenario to match the appropriate total loading
+
+    4. Randomly draw power factors for each load, and then compute
+    var loading accordingly
+
+    5. Randomly flip the sign of some var loads in order to make some
+    loads leading.
+
+    :param self: An initialized child class of
+        DiscreteVoltageControlEnvBase
+    :param load_on_probability: Probability a given load is "on." Should
+        be pretty close to 1.
+    :param min_load_pf: Minimum allowed power factor.
+    :param lead_pf_probability: Probability an individual load will
+        have a leading power factor. Should be closer to 0 than 1 in
+        most cases.
+    :returns: scenario_total_loads_mw, scenario_individual_loads_mw,
+        scenario_individual_loads_mvar.
+
+    """
+    # Define load array shape for convenience.
+    shape = (self.num_scenarios, self.num_loads)
+
+    # Randomly draw an active power loading condition for each
+    # episode from the uniform distribution between min load and
+    # max load.
+    # Initialize then fill the array to get the proper data type.
+    scenario_total_loads_mw = \
+        np.zeros(self.num_scenarios, dtype=self.dtype)
+    scenario_total_loads_mw[:] = self.rng.uniform(
+        self.min_load_mw, self.max_load_mw, self.num_scenarios
+    )
+
+    # Draw to determine which loads will be "on" for each scenario.
+    scenario_loads_off = \
+        self.rng.random(shape, dtype=self.dtype) > load_on_probability
+
+    # Draw initial loading levels. Loads which are "off" will be
+    # removed, and then each row will be scaled.
+    scenario_individual_loads_mw = self.rng.random(shape, dtype=self.dtype)
+
+    # Zero out loads which are off.
+    scenario_individual_loads_mw[scenario_loads_off] = 0.0
+
+    # Scale each row to meet the appropriate scenario total loading.
+    # First, get our vector of scaling factors (factor per row).
+    scale_factor_vector = scenario_total_loads_mw \
+        / scenario_individual_loads_mw.sum(axis=1)
+
+    # Then, multiply each element in each row by its respective
+    # scaling factor. The indexing with None creates an additional
+    # dimension to our vector to allow for that element-wise
+    # scaling.
+    scenario_individual_loads_mw = (
+            scenario_individual_loads_mw * scale_factor_vector[:, None]
+    )
+
+    # Now, come up with reactive power levels for each load based
+    # on the minimum power factor.
+    # Start by randomly generating power factors for each load for
+    # each scenario.
+    pf = np.zeros(shape, dtype=self.dtype)
+    pf[:] = self.rng.uniform(min_load_pf, 1, shape)
+
+    # Use the power factor and MW to get Mvars.
+    # Q = P * tan(arccos(pf))
+    scenario_individual_loads_mvar = (
+            scenario_individual_loads_mw * np.tan(np.arccos(pf)))
+
+    # Possibly flip the sign of the reactive power for some loads
+    # in order to make their power factor leading.
+    lead = self.rng.random(shape, dtype=self.dtype) < lead_pf_probability
+    scenario_individual_loads_mvar[lead] *= -1
+
+    return scenario_total_loads_mw, scenario_individual_loads_mw, \
+        scenario_individual_loads_mvar
+
+
+def _compute_generation_and_dispatch(self) -> np.ndarray:
+    """
+    Drop in replacement for _compute_generation in child classes of
+    DiscreteVoltageControlEnvBase. This method simultaneously computes
+    generator commitment and dispatch by looping over each total
+    loading scenario and performing the following:
+
+    1. Shuffle list of generators.
+
+    2. Loop through shuffled list of generators.
+
+    3. Set generator's MW output to be between its minimum MW output
+    and the remaining load for this scenario. Note that the total
+    load is scaled by the LOSS factor to ensure the slack bus
+    doesn't need to pick up all the losses.
+
+    4. Continue dispatching generators in this fashion until load is
+    met.
+
+    :param self: An initialized child class of
+        DiscreteVoltageControlEnvBase.
+    :returns: scenario_gen_mw
+    """
+    # Initialize term to be used in the loop.
+    gen_delta = 0
+
+    # Initialize the generator power levels to 0.
+    scenario_gen_mw = np.zeros((self.num_scenarios, self.num_gens))
+
+    # Helper for updating gen_delta.
+    def _update_gen_delta(idx_in, load_in):
+        nonlocal gen_delta
+        gen_delta = scenario_gen_mw[idx_in, :].sum() - load_in
+
+    # Initialize indices that we'll be shuffling.
+    gen_indices = np.arange(0, self.num_gens)
+
+    # Loop over each scenario. This may not be the most efficient,
+    # and could possible be vectorized.
+    for scenario_idx in range(self.num_scenarios):
+        # Draw random indices for generators. In this way, we'll
+        # start with a different generator each time.
+        self.rng.shuffle(gen_indices)
+
+        # Get our total load for this scenario. Multiply by losses
+        # so the slack doesn't have to make up too much.
+        load = self.total_load_mw[scenario_idx] * (1 + LOSS)
+
+        # Compute the initial gen_delta. It will be recomputed at the
+        # inside the while loop.
+        _update_gen_delta(idx_in=scenario_idx, load_in=load)
+
+        # Randomly draw generation until we meet the load.
+        # The while loop is here in case we "under draw" generation
+        # such that generation < load.
+        i = 0
+        while (abs(gen_delta) > GEN_LOAD_DELTA_TOL) and (i < ITERATION_MAX):
+            # Ensure generation is zeroed out from the last
+            # last iteration of the loop.
+            scenario_gen_mw[scenario_idx, :] = 0.0
+
+            # Initialize the generation total to 0.
+            gen_total = 0
+
+            # For each generator, draw a power level between its
+            # minimum and maximum.
+            for gen_idx in gen_indices:
+                # If this generator's minimum is greater than the delta,
+                # move along.
+                gen_min = self.gen_init_data.iloc[gen_idx]['GenMWMin']
+                if gen_min > -gen_delta:
+                    continue
+
+                # Draw generation between this generator's minimum
+                # and the minimum of the generator's maximum and
+                # load.
+                gen_mw = self.rng.uniform(
+                    gen_min,
+                    min(self.gen_init_data.iloc[gen_idx]['GenMWMax'], load))
+
+                # Place the generation in the appropriate spot.
+                if (gen_mw + gen_total) > load:
+                    # Generation cannot exceed load. Set this
+                    # generator power output to the remaining load
+                    # and break out of the loop. This will keep the
+                    # remaining generators at 0.
+                    scenario_gen_mw[scenario_idx, gen_idx] = \
+                        load - gen_total
+
+                    # Update.
+                    _update_gen_delta(idx_in=scenario_idx, load_in=load)
+                    break
+                else:
+                    # Use the randomly drawn gen_mw.
+                    scenario_gen_mw[scenario_idx, gen_idx] = gen_mw
+
+                # Compute the delta.
+                _update_gen_delta(idx_in=scenario_idx, load_in=load)
+
+                # Increment the generation total.
+                gen_total += gen_mw
+
+            i += 1
+
+        if i >= ITERATION_MAX:
+            raise ComputeGenMaxIterationsError(
+                f'Iterations exceeded {ITERATION_MAX}')
+
+        self.log.debug(f'It took {i} iterations to create generation for '
+                       f'scenario {scenario_idx}')
+
+    return scenario_gen_mw
+
+
+def _compute_reward_based_on_movement(self) -> float:
+    """Compute reward based on voltage and var loading movement. This
+    is a drop in replacement for the _compute_reward function of child
+    classes of DiscreteVoltageControlEnvBase.
+
+    :param self: An initialized child class of
+        DiscreteVoltageControlEnvBase.
+
+    :returns: reward based on movement.
+    """
+    # First of all, any action gets us a negative reward. We'd like
+    # to avoid changing set points if possible.
+    reward = self.rewards['action']
+
+    # Compute the difference in the distance to nominal voltage for
+    # all buses before and after the action. Multiply by 100 so that
+    # we reward change per 0.01 pu. A positive value indicates
+    # reducing the distance to nominal, while a negative value
+    # indicates increasing the distance to nominal.
+    nom_delta_diff = \
+        ((self.bus_obs_data_prev['BusPUVolt'] - NOMINAL_V).abs()
+         - (self.bus_obs_data['BusPUVolt'] - NOMINAL_V).abs()) * 100
+
+    # Get masks for bus voltages which are too high or too low for
+    # both the previous (pre-action) data frame and the current
+    # (post-action) data frame.
+    low_v_prev = self.bus_obs_data_prev['BusPUVolt'] < LOW_V
+    high_v_prev = self.bus_obs_data_prev['BusPUVolt'] > HIGH_V
+    low_v_now = self.bus_obs_data['BusPUVolt'] < LOW_V
+    high_v_now = self.bus_obs_data['BusPUVolt'] > HIGH_V
+
+    # Get masks for voltages.
+    in_prev = ~low_v_prev & ~high_v_prev  # in bounds before
+    out_prev = low_v_prev | high_v_prev   # out of bounds before
+    in_now = ~low_v_now & ~high_v_now     # in bounds now
+    out_now = low_v_now | high_v_now      # out of bounds now
+
+    # Now, get more "composite" masks
+    in_out = in_prev & out_now          # in before, out now
+    out_in = out_prev & in_now          # out before, in now
+    in_out_low = in_prev & low_v_now    # in before, low now
+    in_out_high = in_prev & high_v_now  # in before, high now
+    # Out of bounds before, but moved in the right direction.
+    out_right_d = out_prev & nom_delta_diff[out_prev] > 0
+
+    # Give reward for voltages that were out of bounds, but moved in
+    # the right direction, based on the change in distance from
+    # nominal voltage.
+    reward += (nom_delta_diff[out_right_d] * self.rewards['v_delta']).sum()
+
+    # Give penalty for voltages that were in bounds, but moved out
+    # of bounds. Penalty should be based on how far away from the
+    # boundary (upper or lower) that they moved.
+    reward += ((self.bus_obs_data['BusPUVolt'][in_out_low] - LOW_V) / 0.01
+               * self.rewards['v_delta']).sum()
+    reward += ((HIGH_V - self.bus_obs_data['BusPUVolt'][in_out_high])
+               / 0.01 * self.rewards['v_delta']).sum()
+
+    # Give an extra penalty for moving buses out of bounds.
+    reward += in_out.sum() * self.rewards['v_out_bounds']
+
+    # Give an extra reward for moving buses in bounds.
+    reward += out_in.sum() * self.rewards['v_in_bounds']
+
+    # Give a positive reward for lessening generator var loading,
+    # and a negative reward for increasing it.
+    # TODO: This really should account for actual vars not just
+    #   percent loading.
+    var_delta = (self.gen_obs_data_prev['GenMVRPercent']
+                 - self.gen_obs_data['GenMVRPercent'])
+
+    reward += (var_delta * self.rewards['gen_var_delta']).sum()
+
+    # All done.
+    return reward
+
+
 class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     """Environment for performing voltage control with the PowerWorld
     Simulator.
@@ -1390,134 +1673,10 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     def action_cap(self) -> int:
         return self._action_cap
 
-    def _compute_loading(self, load_on_probability,
-                         min_load_pf, lead_pf_probability):
-        # Define load array shape for convenience.
-        shape = (self.num_scenarios, self.num_loads)
-
-        # Randomly draw an active power loading condition for each
-        # episode from the uniform distribution between min load and
-        # max load.
-        # Initialize then fill the array to get the proper data type.
-        scenario_total_loads_mw = \
-            np.zeros(self.num_scenarios, dtype=self.dtype)
-        scenario_total_loads_mw[:] = self.rng.uniform(
-            self.min_load_mw, self.max_load_mw, self.num_scenarios
-        )
-
-        # Draw to determine which loads will be "on" for each scenario.
-        scenario_loads_off = \
-            self.rng.random(shape, dtype=self.dtype) > load_on_probability
-
-        # Draw initial loading levels. Loads which are "off" will be
-        # removed, and then each row will be scaled.
-        scenario_individual_loads_mw = self.rng.random(shape, dtype=self.dtype)
-
-        # Zero out loads which are off.
-        scenario_individual_loads_mw[scenario_loads_off] = 0.0
-
-        # Scale each row to meet the appropriate scenario total loading.
-        # First, get our vector of scaling factors (factor per row).
-        scale_factor_vector = scenario_total_loads_mw \
-            / scenario_individual_loads_mw.sum(axis=1)
-
-        # Then, multiply each element in each row by its respective
-        # scaling factor. The indexing with None creates an additional
-        # dimension to our vector to allow for that element-wise
-        # scaling.
-        scenario_individual_loads_mw = (
-                scenario_individual_loads_mw * scale_factor_vector[:, None]
-        )
-
-        # Now, come up with reactive power levels for each load based
-        # on the minimum power factor.
-        # Start by randomly generating power factors for each load for
-        # each scenario.
-        pf = np.zeros(shape, dtype=self.dtype)
-        pf[:] = self.rng.uniform(min_load_pf, 1, shape)
-
-        # Use the power factor and MW to get Mvars.
-        # Q = P * tan(arccos(pf))
-        scenario_individual_loads_mvar = (
-                scenario_individual_loads_mw * np.tan(np.arccos(pf)))
-
-        # Possibly flip the sign of the reactive power for some loads
-        # in order to make their power factor leading.
-        lead = self.rng.random(shape, dtype=self.dtype) < lead_pf_probability
-        scenario_individual_loads_mvar[lead] *= -1
-
-        return scenario_total_loads_mw, scenario_individual_loads_mw, \
-            scenario_individual_loads_mvar
-
-    def _compute_generation(self):
-        # Initialize the generator power levels to 0.
-        scenario_gen_mw = np.zeros((self.num_scenarios, self.num_gens))
-
-        # Initialize indices that we'll be shuffling.
-        gen_indices = np.arange(0, self.num_gens)
-
-        # Loop over each scenario. This may not be the most efficient,
-        # and could possible be vectorized.
-        for scenario_idx in range(self.num_scenarios):
-            # Draw random indices for generators. In this way, we'll
-            # start with a different generator each time.
-            self.rng.shuffle(gen_indices)
-
-            # Get our total load for this scenario. Multiply by losses
-            # so the slack doesn't have to make up too much.
-            load = self.total_load_mw[scenario_idx] * (1 + LOSS)
-
-            # Randomly draw generation until we meet the load.
-            # The while loop is here in case we "under draw" generation
-            # such that generation < load.
-            i = 0
-            while (abs(scenario_gen_mw[scenario_idx, :].sum() - load)
-                   > GEN_LOAD_DELTA_TOL) and (i < ITERATION_MAX):
-
-                # Ensure generation is zeroed out from the last
-                # last iteration of the loop.
-                scenario_gen_mw[scenario_idx, :] = 0.0
-
-                # Initialize the generation total to 0.
-                gen_total = 0
-
-                # For each generator, draw a power level between its
-                # minimum and maximum.
-                for gen_idx in gen_indices:
-                    # Draw generation between this generator's minimum
-                    # and the minimum of the generator's maximum and
-                    # load.
-                    gen_mw = self.rng.uniform(
-                        self.gen_init_data.iloc[gen_idx]['GenMWMin'],
-                        min(self.gen_init_data.iloc[gen_idx]['GenMWMax'],
-                            load))
-
-                    # Place the generation in the appropriate spot.
-                    if (gen_mw + gen_total) > load:
-                        # Generation cannot exceed load. Set this
-                        # generator power output to the remaining load
-                        # and break out of the loop. This will keep the
-                        # remaining generators at 0.
-                        scenario_gen_mw[scenario_idx, gen_idx] = \
-                            load - gen_total
-                        break
-                    else:
-                        # Use the randomly drawn gen_mw.
-                        scenario_gen_mw[scenario_idx, gen_idx] = gen_mw
-
-                    # Increment the generation total.
-                    gen_total += gen_mw
-
-                i += 1
-
-            if i >= ITERATION_MAX:
-                raise ComputeGenMaxIterationsError(
-                    f'Iterations exceeded {ITERATION_MAX}')
-
-            self.log.debug(f'It took {i} iterations to create generation for '
-                           f'scenario {scenario_idx}')
-
-        return scenario_gen_mw
+    # Use helper functions to
+    _compute_loading = _compute_loading_robust
+    _compute_generation = _compute_generation_and_dispatch
+    _compute_reward = _compute_reward_based_on_movement
 
     def _take_action(self, action):
         """Helper to make the appropriate updates in PowerWorld for a
@@ -1562,77 +1721,6 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
             # Flag for leading power factors.
             self.load_obs_data['lead'].to_numpy(dtype=self.dtype)
         ])
-
-    def _compute_reward(self):
-        """Helper to compute a reward after an action. This method
-        should only be called after _rotate_and_get_observation_frames,
-        as that method updates the observation DataFrame attributes.
-        """
-        # First of all, any action gets us a negative reward. We'd like
-        # to avoid changing set points if possible.
-        reward = self.rewards['action']
-
-        # Compute the difference in the distance to nominal voltage for
-        # all buses before and after the action. Multiply by 100 so that
-        # we reward change per 0.01 pu. A positive value indicates
-        # reducing the distance to nominal, while a negative value
-        # indicates increasing the distance to nominal.
-        nom_delta_diff = \
-            ((self.bus_obs_data_prev['BusPUVolt'] - NOMINAL_V).abs()
-             - (self.bus_obs_data['BusPUVolt'] - NOMINAL_V).abs()) * 100
-
-        # Get masks for bus voltages which are too high or too low for
-        # both the previous (pre-action) data frame and the current
-        # (post-action) data frame.
-        low_v_prev = self.bus_obs_data_prev['BusPUVolt'] < LOW_V
-        high_v_prev = self.bus_obs_data_prev['BusPUVolt'] > HIGH_V
-        low_v_now = self.bus_obs_data['BusPUVolt'] < LOW_V
-        high_v_now = self.bus_obs_data['BusPUVolt'] > HIGH_V
-
-        # Get masks for voltages.
-        in_prev = ~low_v_prev & ~high_v_prev  # in bounds before
-        out_prev = low_v_prev | high_v_prev   # out of bounds before
-        in_now = ~low_v_now & ~high_v_now     # in bounds now
-        out_now = low_v_now | high_v_now      # out of bounds now
-
-        # Now, get more "composite" masks
-        in_out = in_prev & out_now          # in before, out now
-        out_in = out_prev & in_now          # out before, in now
-        in_out_low = in_prev & low_v_now    # in before, low now
-        in_out_high = in_prev & high_v_now  # in before, high now
-        # Out of bounds before, but moved in the right direction.
-        out_right_d = out_prev & nom_delta_diff[out_prev] > 0
-
-        # Give reward for voltages that were out of bounds, but moved in
-        # the right direction, based on the change in distance from
-        # nominal voltage.
-        reward += (nom_delta_diff[out_right_d] * self.rewards['v_delta']).sum()
-
-        # Give penalty for voltages that were in bounds, but moved out
-        # of bounds. Penalty should be based on how far away from the
-        # boundary (upper or lower) that they moved.
-        reward += ((self.bus_obs_data['BusPUVolt'][in_out_low] - LOW_V) / 0.01
-                   * self.rewards['v_delta']).sum()
-        reward += ((HIGH_V - self.bus_obs_data['BusPUVolt'][in_out_high])
-                   / 0.01 * self.rewards['v_delta']).sum()
-
-        # Give an extra penalty for moving buses out of bounds.
-        reward += in_out.sum() * self.rewards['v_out_bounds']
-
-        # Give an extra reward for moving buses in bounds.
-        reward += out_in.sum() * self.rewards['v_in_bounds']
-
-        # Give a positive reward for lessening generator var loading,
-        # and a negative reward for increasing it.
-        # TODO: This really should account for actual vars not just
-        #   percent loading.
-        var_delta = (self.gen_obs_data_prev['GenMVRPercent']
-                     - self.gen_obs_data['GenMVRPercent'])
-
-        reward += (var_delta * self.rewards['gen_var_delta']).sum()
-
-        # All done.
-        return reward
 
     def _extra_reset_actions(self):
         """No extra reset actions needed here."""
