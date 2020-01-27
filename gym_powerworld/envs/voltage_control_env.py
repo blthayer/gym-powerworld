@@ -808,6 +808,27 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self.saw.exit()
         self._flush_log()
 
+    def reset_log(self, new_file) -> None:
+        """Reset the log. This is useful if you, for example, have
+        stopped training and want to create a new log for testing the
+        trained agent.
+
+        :param new_file: Full path to the new csv log file to be
+            created.
+        """
+        # Start by ensuring the log has been completely flushed.
+        self._flush_log()
+
+        # Overwrite the csv_logfile.
+        self.csv_logfile = new_file
+
+        # Reset the log index and flush count.
+        self.log_idx = 0
+        self.log_flush_count = 0
+
+        # All done.
+        return None
+
     ####################################################################
     # Private methods
     ####################################################################

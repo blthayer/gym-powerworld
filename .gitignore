@@ -1,3 +1,6 @@
+# Be lazy, and just ignore log files in the tests directory.
+tests/*log.csv
+
 # PyCharm junk.
 *.idea*
 

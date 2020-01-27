@@ -1793,6 +1793,18 @@ class GridMindControlEnv14BusLoggingTestCase(unittest.TestCase):
         self.assertFalse(np.array_equal(
             np.zeros(log_data.shape[1]), log_data.to_numpy()[-1, :]))
 
+        # Finally, ensure the "reset_log" method works as intended.
+        with patch.object(self.env, '_flush_log') as p:
+            self.env.reset_log(new_file='mynewlog.csv')
+
+        # Ensure _flush_log gets called, and that the appropriate
+        # variables get reset.
+        p.assert_called_once()
+        self.assertEqual(self.env.log_idx, 0)
+        self.assertEqual(self.env.log_flush_count, 0)
+        self.assertEqual(self.env.csv_logfile, 'mynewlog.csv')
+
+
 
 if __name__ == '__main__':
     unittest.main()
