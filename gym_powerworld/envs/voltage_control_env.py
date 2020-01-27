@@ -885,10 +885,18 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
 
         # Add text.
         txt = (f'Episode: {self.scenario_idx}, Action Count: '
-               f'{self.action_count}\nCurrent Reward: {self.current_reward}')
-        self.ax.text(
-            0.1, 0.9, txt, color='black',
-            bbox=dict(facecolor='white', edgecolor='black'))
+               f'{self.action_count}, Current Reward: {self.current_reward}')
+
+        # Using the axis title seems to be best (as opposed to the
+        # figure supertitle or adding a text box).
+        self.ax.set_title(txt, fontsize=32, fontweight='bold')
+        # self.fig.suptitle(txt, fontsize=32, fontweight='bold')
+        # self.ax.text(
+        #     0.1, 0.9, txt, color='black',
+        #     bbox=dict(facecolor='white', edgecolor='black'))
+
+        # Ensure the title is nice and tight to the figure.
+        plt.tight_layout()
 
         # Redraw and pause.
         # Do we want/need to tighten the layout?
