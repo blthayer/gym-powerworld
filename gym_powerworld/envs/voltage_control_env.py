@@ -1545,6 +1545,10 @@ def _compute_reward_based_on_movement(self) -> float:
 
     :returns: reward based on movement.
     """
+    # TODO: Add a "no-op" "path" --> get rewarded if all voltages are in
+    #   bounds and no action was taken, get penalized if no action was
+    #   taken but not all voltages are in bounds.
+
     # First of all, any action gets us a negative reward. We'd like
     # to avoid changing set points if possible.
     reward = self.rewards['action']
@@ -1715,6 +1719,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         ################################################################
         # Action space definition
         ################################################################
+        # TODO: Add a "no-op" action.
         # Create action space by discretizing generator set points.
         self.action_space = spaces.Discrete(self.num_gens
                                             * num_gen_voltage_bins)
@@ -1777,7 +1782,6 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         # Set the action cap to be double the number of generators.
         # TODO: Include other controllable assets, e.g. shunts/taps
         self._action_cap = 2 * self.num_gens
-
         # All done.
 
     @property
@@ -1793,6 +1797,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         """Helper to make the appropriate updates in PowerWorld for a
         given action.
         """
+        # TODO: Add a "no-op" action.
         # Look up action and send to PowerWorld.
         gen_idx = self.action_array[action, 0]
         voltage = self.gen_bins[self.action_array[action, 1]]
