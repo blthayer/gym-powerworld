@@ -1689,7 +1689,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
                  oneline_axd: str = None,
                  contour_axd: str = None,
                  image_dir: str = None,
-                 render_interval: int = 1,
+                 render_interval: float = 1.0,
                  log_buffer: int = 10000,
                  csv_logfile: str = 'log.csv'
                  ):
@@ -1925,7 +1925,7 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
                  oneline_axd: str = None,
                  contour_axd: str = None,
                  image_dir: str = None,
-                 render_interval: int = 1,
+                 render_interval: float = 1.0,
                  log_buffer: int = 10000,
                  csv_logfile: str = 'log.csv'
                  ):
