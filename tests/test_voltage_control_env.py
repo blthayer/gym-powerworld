@@ -2,8 +2,7 @@ import unittest
 from unittest.mock import patch
 from gym_powerworld.envs import voltage_control_env
 from gym_powerworld.envs.voltage_control_env import LOSS, \
-    MinLoadBelowMinGenError, MaxLoadAboveMaxGenError, OutOfScenariosError, \
-    ComputeGenMaxIterationsError
+    MinLoadBelowMinGenError, MaxLoadAboveMaxGenError, OutOfScenariosError
 import os
 import pandas as pd
 import numpy as np
@@ -343,6 +342,19 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
         #     # noinspection PyUnresolvedReferences
         # self.assertTrue((gen_output >= row.GenMWMin).all())
 
+    def test_gen_v(self):
+        # Shape.
+        self.assertEqual(self.env.gen_v.shape,
+                         (self.env.num_scenarios, self.env.num_gens))
+
+        # Values.
+        self.assertTrue(
+            ((self.env.gen_v >= self.gen_voltage_range[0]).all()
+             and
+             (self.env.gen_v <= self.gen_voltage_range[1]).all()
+             )
+        )
+
     def test_action_space(self):
         self.assertIsInstance(self.env.action_space, Discrete)
         self.assertEqual(self.env.action_space.n,
@@ -578,10 +590,15 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
         # the others are "Closed" and thus regulating their voltage.
         # We'll patch the environment's gen_mw to have all gens on
         # and sharing the load evenly except the generator at bus 2.
+        # We'll also patch all gens to be regulating to 1.05 per unit.
         p = LOAD_MW_14 / 4
         gen_mw_row = np.array([p, 0, p, p, p])
         gen_mw = self.env.gen_mw.copy()
         gen_mw[0, :] = gen_mw_row
+
+        gen_v_row = np.array([1.05] * 5)
+        gen_v = self.env.gen_v.copy()
+        gen_v[0, :] = gen_v_row
 
         # Extract the original loading, but we'll bump one load by 1 MW
         # and 1 MVAR and decrement another by 1 MW and 1 MVAR.
@@ -600,30 +617,36 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
         # Patch the scenario index, generator output, and loading. Then
         # reset the environment.
         with patch.object(self.env, 'gen_mw', new=gen_mw):
-            with patch.object(self.env, 'loads_mw', new=loads_mw):
-                with patch.object(self.env, 'loads_mvar', new=loads_mvar):
-                    self.env.reset()
+            with patch.object(self.env, 'gen_v', new=gen_v):
+                with patch.object(self.env, 'loads_mw', new=loads_mw):
+                    with patch.object(self.env, 'loads_mvar', new=loads_mvar):
+                        self.env.reset()
 
         # Pull the generator data from PowerWorld and ensure that both
         # the status and output match up.
-        gen_init_data = self.env.saw.GetParametersMultipleElement(
+        gen_reset_data = self.env.saw.GetParametersMultipleElement(
             ObjectType='gen',
             ParamList=self.env.gen_key_fields + self.env.GEN_RESET_FIELDS)
 
         # All gens except for the 2nd should be closed.
         status = ['Closed'] * 5
         status[1] = 'Open'
-        self.assertListEqual(status, gen_init_data['GenStatus'].tolist())
+        self.assertListEqual(status, gen_reset_data['GenStatus'].tolist())
 
         # Excluding the slack, generator MW output should exactly match
         # what was commanded.
         np.testing.assert_allclose(
-            gen_mw_row[1:], gen_init_data['GenMW'].to_numpy()[1:])
+            gen_mw_row[1:], gen_reset_data['GenMW'].to_numpy()[1:])
 
         # The slack should be equal to within our assumed line losses.
         np.testing.assert_allclose(
-            gen_mw_row[0], gen_init_data['GenMW'].to_numpy()[0],
+            gen_mw_row[0], gen_reset_data['GenMW'].to_numpy()[0],
             rtol=LOSS, atol=0
+        )
+
+        # Generator voltage setpoints should match.
+        np.testing.assert_allclose(
+            gen_v_row, gen_reset_data['GenVoltSet'].to_numpy()
         )
 
         # Pull the load data from PowerWorld and ensure that both the
@@ -1803,7 +1826,6 @@ class GridMindControlEnv14BusLoggingTestCase(unittest.TestCase):
         self.assertEqual(self.env.log_idx, 0)
         self.assertEqual(self.env.log_flush_count, 0)
         self.assertEqual(self.env.csv_logfile, 'mynewlog.csv')
-
 
 
 if __name__ == '__main__':

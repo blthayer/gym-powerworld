@@ -55,7 +55,7 @@ PLURAL_MAP = {
 }
 
 
-def _set_gens_for_scenario_from_gen_mw(self) -> None:
+def _set_gens_for_scenario_gen_mw_and_v_set_point(self) -> None:
     """Set generator Open/Closed states and set Gen MW setpoints based
     on self's "gen_mw" attribute.
 
@@ -71,6 +71,10 @@ def _set_gens_for_scenario_from_gen_mw(self) -> None:
     gen_g_0 = self.gen_mw[self.scenario_idx, :] > 0
     gens.loc[gen_g_0, 'GenStatus'] = 'Closed'
     gens.loc[~gen_g_0, 'GenStatus'] = 'Open'
+
+    # Change voltage set points.
+    gens.loc[:, 'GenVoltSet'] = self.gen_v[self.scenario_idx, :]
+
     self.saw.change_parameters_multiple_element_df('gen', gens)
 
     # Nothing to return.
@@ -89,6 +93,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     Subclasses must implement the following methods:
     - _compute_loading
     - _compute_generation
+    - _compute_gen_v_set_points
     - _take_action
     - _get_observation
     - _compute_reward
@@ -396,6 +401,9 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self.log_buffer = log_buffer
         self.csv_logfile = csv_logfile
 
+        # Load factors.
+        self.min_load_factor = min_load_factor
+        self.max_load_factor = max_load_factor
         ################################################################
         # Rendering related stuff
         ################################################################
@@ -580,13 +588,6 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                                   lead_pf_probability=lead_pf_probability)
 
         ################################################################
-        # Scenario/episode initialization: generation
-        ################################################################
-        # Compute each individual generator's active power contribution
-        # for each loading scenario.
-        self.gen_mw = self._compute_generation()
-
-        ################################################################
         # Action space
         ################################################################
         # Start by creating the generator bins.
@@ -595,6 +596,14 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
 
         # Subclasses should set the action_space based on the gen_bins
         # and/or other factors.
+
+        ################################################################
+        # Scenario/episode initialization: generation
+        ################################################################
+        # Compute each individual generator's active power contribution
+        # for each loading scenario.
+        self.gen_mw = self._compute_generation()
+        self.gen_v = self._compute_gen_v_set_points()
 
         ################################################################
         # Observation space definition
@@ -1107,7 +1116,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # That's it.
         return None
 
-    _set_gens_for_scenario = _set_gens_for_scenario_from_gen_mw
+    _set_gens_for_scenario = _set_gens_for_scenario_gen_mw_and_v_set_point
 
     def _set_loads_for_scenario(self):
         """Helper to set up loads in the case for this episode/scenario.
@@ -1216,6 +1225,12 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         pass
 
     @abstractmethod
+    def _compute_gen_v_set_points(self):
+        """Subclasses should implement this method to create an array
+        of voltage set points for generators for each scenario.
+        """
+
+    @abstractmethod
     def _take_action(self, action):
         """Subclasses should implement a _take_action method which takes
         a given action, looks up what it does, and takes the action in
@@ -1257,8 +1272,9 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         """
 
 
-def _compute_loading_robust(self, load_on_probability,
-                            min_load_pf, lead_pf_probability) -> \
+def _compute_loading_robust(self: DiscreteVoltageControlEnvBase,
+                            load_on_probability, min_load_pf,
+                            lead_pf_probability) -> \
         Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     "Robust" computation of loading, can be used as a drop-in for the
@@ -1350,7 +1366,8 @@ def _compute_loading_robust(self, load_on_probability,
 
 
 # noinspection PyUnusedLocal
-def _compute_loading_gridmind(self, *args, **kwargs) -> \
+def _compute_loading_gridmind(self: DiscreteVoltageControlEnvBase, *args,
+                              **kwargs) -> \
         Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """As far as I can tell, the GridMind loading is dead simple -
     they scale each load between 80% and 120% of original.
@@ -1393,7 +1410,8 @@ def _compute_loading_gridmind(self, *args, **kwargs) -> \
         scenario_individual_loads_mw, scenario_individual_loads_mvar
 
 
-def _compute_generation_and_dispatch(self) -> np.ndarray:
+def _compute_generation_and_dispatch(self: DiscreteVoltageControlEnvBase) -> \
+        np.ndarray:
     """
     Drop in replacement for _compute_generation in child classes of
     DiscreteVoltageControlEnvBase. This method simultaneously computes
@@ -1507,7 +1525,7 @@ def _compute_generation_and_dispatch(self) -> np.ndarray:
     return scenario_gen_mw
 
 
-def _compute_generation_gridmind(self) -> None:
+def _compute_generation_gridmind(self: DiscreteVoltageControlEnvBase) -> None:
     """Here's the relevant text from the paper:
 
     "When loads change, generators are re-dispatched based on a
@@ -1564,7 +1582,17 @@ def _compute_generation_gridmind(self) -> None:
     return None
 
 
-def _compute_reward_based_on_movement(self) -> float:
+def _compute_gen_v_set_points_draw(self: DiscreteVoltageControlEnvBase) -> \
+        np.ndarray:
+    """Compute generator voltage set points by drawing from the
+    environment's gen_bins attribute.
+    """
+    return self.rng.choice(
+        self.gen_bins, size=(self.num_scenarios, self.num_gens), replace=True)
+
+
+def _compute_reward_based_on_movement(self: DiscreteVoltageControlEnvBase) ->\
+        float:
     """Compute reward based on voltage and var loading movement. This
     is a drop in replacement for the _compute_reward function of child
     classes of DiscreteVoltageControlEnvBase.
@@ -1654,7 +1682,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
                        'GenMWMin', 'GenMVRMax', 'GenMVRMin', 'GenStatus']
     GEN_OBS_FIELDS = ['GenMW', 'GenMWMax', 'GenMVA', 'GenMVRPercent',
                       'GenStatus']
-    GEN_RESET_FIELDS = ['GenMW', 'GenStatus']
+    GEN_RESET_FIELDS = ['GenMW', 'GenStatus', 'GenVoltSet']
 
     # Load fields.
     LOAD_INIT_FIELDS = LOAD_P + LOAD_I_Z
@@ -1817,10 +1845,11 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     def action_cap(self) -> int:
         return self._action_cap
 
-    # Use helper functions to
+    # Use helper functions to simplify the class definition.
     _compute_loading = _compute_loading_robust
     _compute_generation = _compute_generation_and_dispatch
     _compute_reward = _compute_reward_based_on_movement
+    _compute_gen_v_set_points = _compute_gen_v_set_points_draw
 
     def _take_action(self, action):
         """Helper to make the appropriate updates in PowerWorld for a
@@ -1881,7 +1910,6 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         return self.rewards['fail'] + self.rewards['action']
 
 
-# noinspection PyAbstractClass
 class GridMindEnv(DiscreteVoltageControlEnvBase):
     """Environment for attempting to replicate the work done by the
     State Grid Corporation of China, described in the following paper:
@@ -1965,11 +1993,6 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
                  ):
         """See parent class for parameter descriptions.
         """
-        # We'll hang onto the max_load_factor and min_load_factor
-        # attributes for this environment.
-        self.min_load_factor = min_load_factor
-        self.max_load_factor = max_load_factor
-
         # Initialize attribute for tracking episode cumulative rewards.
         # It'll be reset in _take_extra_reset_actions.
         self.cumulative_reward = 0
@@ -2046,6 +2069,12 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         """
         pass
 
+    def _compute_gen_v_set_points(self):
+        """The GridMind implementation does not change generator voltage
+        set points.
+        """
+        return None
+
     def _compute_reward(self):
         """The reward structure for GridMind is pretty primitive -
         rewards for getting all buses in the normal zone, penalties if
@@ -2113,7 +2142,8 @@ class GridMindHardEnv(GridMindEnv):
     """
     _compute_loading = _compute_loading_robust
     _compute_generation = _compute_generation_and_dispatch
-    _set_gens_for_scenario = _set_gens_for_scenario_from_gen_mw
+    _compute_gen_v_set_points = _compute_gen_v_set_points_draw
+    _set_gens_for_scenario = _set_gens_for_scenario_gen_mw_and_v_set_point
 
 
 class Error(Exception):
