@@ -629,10 +629,14 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Start by retrieving a list of bus numbers.
         buses = self.saw.GetParametersMultipleElement(
             'bus', self.bus_key_fields)
-        # Log episode #, action taken, and all bus voltages
+        # Log episode #, action taken, all bus voltages, all generator
+        # set points.
         self.log_columns = \
             ['episode', 'action_taken', 'reward'] \
-            + [f'bus_{n}_v' for n in buses['BusNum'].tolist()]
+            + [f'bus_{n}_v' for n in buses['BusNum'].tolist()] \
+            + [f'gen_{bus}_{i}' for bus, i in
+               zip(self.gen_init_data['BusNum'].to_numpy(),
+                   self.gen_init_data['GenID'].to_numpy())]
 
         # Initialize the logging array.
         self.log_array = np.zeros((self.log_buffer, len(self.log_columns)))
@@ -1189,7 +1193,10 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self.log_array[self.log_idx, 2] = self.current_reward
         # Data.
         self.log_array[self.log_idx, 3:] = \
-            self.bus_obs_data['BusPUVolt'].to_numpy()
+            np.concatenate(
+                (self.bus_obs_data['BusPUVolt'].to_numpy(),
+                 self.gen_obs_data['GenVoltSet'].to_numpy())
+            )
 
         # Increment the log index.
         self.log_idx += 1
@@ -1681,7 +1688,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     GEN_INIT_FIELDS = ['BusCat', 'GenMW', 'GenMVR', 'GenVoltSet', 'GenMWMax',
                        'GenMWMin', 'GenMVRMax', 'GenMVRMin', 'GenStatus']
     GEN_OBS_FIELDS = ['GenMW', 'GenMWMax', 'GenMVA', 'GenMVRPercent',
-                      'GenStatus']
+                      'GenStatus', 'GenVoltSet']
     GEN_RESET_FIELDS = ['GenMW', 'GenStatus', 'GenVoltSet']
 
     # Load fields.
@@ -1938,7 +1945,7 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
     GEN_INIT_FIELDS = ['GenMW', 'GenMVR', 'GenVoltSet', 'GenMWMax',
                        'GenMWMin', 'GenMVRMax', 'GenMVRMin', 'GenStatus']
     GEN_OBS_FIELDS = ['GenMW', 'GenMWMax', 'GenMVA', 'GenMVRPercent',
-                      'GenStatus']
+                      'GenStatus', 'GenVoltSet']
     GEN_RESET_FIELDS = ['GenMW', 'GenStatus']
 
     # Load fields.

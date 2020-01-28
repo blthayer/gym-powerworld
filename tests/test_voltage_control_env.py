@@ -466,13 +466,16 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
         """Ensure the log columns are as they should be."""
         self.assertListEqual(
             ['episode', 'action_taken', 'reward']
-            + [f'bus_{x+1}_v' for x in range(14)], self.env.log_columns
+            + [f'bus_{x+1}_v' for x in range(14)]
+            + [f'gen_{x}_{y}' for x, y in zip([1, 2, 3, 6, 8], [1] * 5)],
+            self.env.log_columns
         )
 
     def test_log_array(self):
         self.assertEqual(self.env.log_array.shape,
-                         # 14 + 3 --> num buses plus ep, action, reward
-                         (self.log_buffer, 14 + 3))
+                         # 14 + 3 --> num buses plus ep, action, reward,
+                         # and num gens.
+                         (self.log_buffer, 14 + 3 + 5))
 
 
 # noinspection DuplicatedCode
@@ -1715,7 +1718,7 @@ class GridMindControlEnv14BusLoggingTestCase(unittest.TestCase):
         works as expected.
         """
         # Ensure the log array starts empty.
-        zeros = np.zeros((self.log_buffer, 14 + 3))
+        zeros = np.zeros((self.log_buffer, 14 + 3 + 5))
         np.testing.assert_array_equal(zeros, self.env.log_array)
 
         # Calling reset should create a log entry.
@@ -1770,10 +1773,11 @@ class GridMindControlEnv14BusLoggingTestCase(unittest.TestCase):
         self.assertTrue(np.isnan(log_data['reward'].to_numpy()[0]))
         self.assertFalse(np.isnan(log_data['reward'].to_numpy()[1:]).any())
 
-        # Bus voltages should be greater than 0.
+        # Bus voltages and generator setpoints should be greater than 0.
         bus_cols = log_data.columns.to_numpy()[
-            log_data.columns.str.startswith('bus_')]
-        self.assertEqual((14,), bus_cols.shape)
+            log_data.columns.str.startswith('bus_') |
+            log_data.columns.str.startswith('gen_')]
+        self.assertEqual((14+5,), bus_cols.shape)
         self.assertTrue((log_data[bus_cols].to_numpy() > 0).all())
 
         # Reset the environment and take another set of actions that
