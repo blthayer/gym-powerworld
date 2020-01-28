@@ -54,6 +54,9 @@ PLURAL_MAP = {
     'shunt': 'shunts'
 }
 
+# For determining if we're "in bounds," round first.
+ROUND_DECIMALS = 6
+
 
 def _set_gens_for_scenario_gen_mw_and_v_set_point(self) -> None:
     """Set generator Open/Closed states and set Gen MW setpoints based
@@ -694,7 +697,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     def all_v_in_range(self):
         """True if all voltages are on interval
         [self.low_v, self.high_v], False otherwise."""
-        return self.bus_obs_data['BusPUVolt'].between(
+        return self.bus_obs_data['BusPUVolt'].round(ROUND_DECIMALS).between(
             self.low_v, self.high_v, inclusive=True).all()
 
     ####################################################################
