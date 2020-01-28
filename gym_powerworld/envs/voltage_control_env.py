@@ -2091,8 +2091,10 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         "exists" symbols really should be interpreted as "if all" and
         "if any."
         """
-        # Get voltage data.
-        v = self.bus_obs_data['BusPUVolt']
+        # Get voltage data, round out to 6 decimal places. This prevents
+        # issues like 1.05000001 resulting in a violation, which is
+        # frankly silly.
+        v = self.bus_obs_data['BusPUVolt'].round(6)
 
         # Reward if all buses are in bounds.
         if v.between(0.95, 1.05, inclusive=True).all():
