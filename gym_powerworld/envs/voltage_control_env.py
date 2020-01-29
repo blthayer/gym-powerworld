@@ -759,6 +759,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                 self.log.debug(
                     f'Scenario {self.scenario_idx} failed. Error message: '
                     f'{exc.args[0]}')
+                obs = None
             else:
                 # Success! The power flow solved, and no voltages went
                 # below the minimum. Signify we're done looping.
@@ -771,7 +772,8 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self._add_to_log(action=np.nan)
 
         # Raise exception if we've gone through all the scenarios.
-        if self.scenario_idx >= self.num_scenarios:
+        # noinspection PyUnboundLocalVariable
+        if (self.scenario_idx >= self.num_scenarios) and (obs is None):
             raise OutOfScenariosError('We have gone through all scenarios.')
 
         # Return the observation.
