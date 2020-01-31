@@ -790,18 +790,24 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Take the action.
         self._take_action(action)
 
+        # Initialize info dict.
+        info = dict()
+
         # Solve the power flow and get an observation.
         try:
             obs = self._solve_and_observe()
         except (PowerWorldError, LowVoltageError):
             # The power flow failed to solve or bus voltages went below
             # the minimum. This episode is complete.
-            obs = None
+            #
+            # Get an observation for the special case where the power
+            # flow failed (or we have really low voltages).
+            obs = self._get_observation_failed_pf()
             done = True
             # An action was taken, so include both the action and
             # failure penalties.
             reward = self._compute_failed_pf_reward()
-            info = {'is_success': False}
+            info['is_success'] = False
         else:
             # The power flow successfully solved. Compute the reward
             # and check to see if this episode is done.
@@ -809,9 +815,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             done = self._check_done()
 
             if done and self.all_v_in_range:
-                info = {'is_success': True}
-            else:
-                info = dict()
+                info['is_success'] = True
 
         # Some subclasses may wish to add an end of episode reward.
         if done:
@@ -1269,6 +1273,13 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     def _get_observation(self):
         """Subclasses should implement a _get_observation method which
         returns an observation.
+        """
+
+    @abstractmethod
+    def _get_observation_failed_pf(self):
+        """Subclasses should implement a _get_observation method which
+        returns an observation ONLY in the case of a failed power flow
+        or LowVoltageError.
         """
 
     @abstractmethod
@@ -1847,6 +1858,8 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         # will almost always be producing rather than consuming vars.
         # May want to change this in the future.
         self.num_obs = self.num_buses + 3 * self.num_gens + 3 * self.num_loads
+        # TODO: This is wrong. Several of these values can actually go
+        #   below zero.
         low = np.zeros(self.num_obs, dtype=self.dtype)
         # Put a cap of 2 p.u. voltage on observations - I don't see how
         # bus voltages could ever get that high.
@@ -1921,6 +1934,17 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
             # Flag for leading power factors.
             self.load_obs_data['lead'].to_numpy(dtype=self.dtype)
         ])
+
+    def _get_observation_failed_pf(self):
+        """Use the regular _get_observation call, but zero out the
+        voltages.
+        """
+        # Use the normal method of getting an observation.
+        obs = self._get_observation()
+        # Zero out the voltages.
+        obs[0:self.num_buses] = 0.0
+        # Done.
+        return obs
 
     def _extra_reset_actions(self):
         """No extra reset actions needed here."""
@@ -2138,6 +2162,10 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         (angle and magnitude)).
         """
         return self.bus_obs_data['BusPUVolt'].to_numpy(dtype=self.dtype)
+
+    def _get_observation_failed_pf(self):
+        """Return 0 voltages."""
+        return np.zeros(self.num_buses, dtype=self.dtype)
 
     def _take_action(self, action: int):
         """Send the generator set points into PowerWorld.

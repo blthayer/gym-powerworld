@@ -868,15 +868,25 @@ class DiscreteVoltageControlEnv14BusStepTestCase(unittest.TestCase):
 
     def test_failed_power_flow(self):
         """If a PowerWorldError is raised while calling SolvePowerFlow,
-        the observation should come back as None, and the reward should
-        be negative.
+        the observation should come back with zeros in the voltage
+        positions, and the reward should be negative.
         """
         with patch.object(self.env.saw, 'SolvePowerFlow',
                           side_effect=PowerWorldError('failure')):
             obs, reward, done, info = self.env.step(12)
 
-        self.assertIsNone(obs)
-        self.assertTrue(done)
+        # Ensure there are zeroes in the appropriate slots.
+        self.assertTrue((obs[0:self.env.num_buses] == 0.0).all())
+
+        # Ensure the observation is of the expected size.
+        self.assertEqual(obs.shape, (self.env.num_obs,))
+
+        # TODO: This fails because we actually can have numbers less
+        #   than 0. So, also need to fix the observation space
+        #   definition.
+        self.assertTrue((obs[self.env.num_buses:] >= 0.0).all())
+
+        # Make sure the reward is as expected.
         self.assertEqual(
             reward, self.env.rewards['action'] + self.env.rewards['fail'])
 
@@ -1463,6 +1473,11 @@ class GridMindControlEnv14BusMiscTestCase(unittest.TestCase):
         np.testing.assert_allclose(gens['GenVoltSet'].to_numpy(),
                                    self.gen_voltage_range[1])
 
+    def test_failed_pf_obs_zero(self):
+        obs = self.env._get_observation_failed_pf()
+        self.assertTrue((obs == 0.0).all())
+        self.assertEqual(obs.shape, (self.env.num_buses,))
+
 
 # noinspection DuplicatedCode
 class GridMindControlEnv14BusCondensersTestCase(unittest.TestCase):
@@ -1892,9 +1907,10 @@ class GridMindContingenciesEnv14BusLineOpenTestCase(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.env.close()
 
-    def setup(self):
+    def setUp(self):
         # Load the state between runs.
         self.env.saw.LoadState()
+        self.env.saw.SolvePowerFlow()
 
     def _all_closed(self):
         line_data = self.env.saw.GetParametersMultipleElement(
@@ -1912,10 +1928,6 @@ class GridMindContingenciesEnv14BusLineOpenTestCase(unittest.TestCase):
         self.assertEqual(1, line_data[~closed].shape[0])
 
     def test_set_branches_for_scenario(self):
-        # Ensure the init data shows all lines closed.
-        self.assertTrue(
-            (self.env.branch_init_data['LineStatus'] == 'Closed').all())
-
         # Ensure the lines are actually all closed right now.
         self._all_closed()
 
