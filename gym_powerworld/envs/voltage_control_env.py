@@ -809,7 +809,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             done = self._check_done()
 
             if done and self.all_v_in_range:
-                info = {'is_success': False}
+                info = {'is_success': True}
             else:
                 info = dict()
 
