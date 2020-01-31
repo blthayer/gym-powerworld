@@ -1832,5 +1832,109 @@ class GridMindControlEnv14BusLoggingTestCase(unittest.TestCase):
         self.assertEqual(self.env.csv_logfile, 'mynewlog.csv')
 
 
+# noinspection DuplicatedCode
+class GridMindContingenciesEnv14BusLineOpenTestCase(unittest.TestCase):
+    """Test that line opening is happening as it should.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 1000
+        cls.max_load_factor = 1.2
+        cls.min_load_factor = 0.8
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.num_gen_voltage_bins = 5
+        cls.gen_voltage_range = (0.95, 1.05)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+        cls.log_buffer = 10
+        cls.csv_logfile = 'log.csv'
+
+        # Ensure we remove the logfile if it was created by other
+        # test cases.
+        try:
+            os.remove(cls.csv_logfile)
+        except FileNotFoundError:
+            pass
+
+        cls.rewards = {
+            "normal": 100,
+            "violation": -50,
+            "diverged": -100
+        }
+
+        cls.env = voltage_control_env.GridMindContingenciesEnv(
+            pwb_path=PWB_14_CONDENSERS, num_scenarios=cls.num_scenarios,
+            max_load_factor=cls.max_load_factor,
+            min_load_factor=cls.min_load_factor,
+            min_load_pf=cls.min_load_pf,
+            lead_pf_probability=cls.lead_pf_probability,
+            load_on_probability=cls.load_on_probability,
+            num_gen_voltage_bins=cls.num_gen_voltage_bins,
+            gen_voltage_range=cls.gen_voltage_range,
+            seed=cls.seed,
+            log_level=logging.INFO,
+            rewards=cls.rewards,
+            dtype=cls.dtype,
+            log_buffer=cls.log_buffer,
+            csv_logfile=cls.csv_logfile
+        )
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.close()
+
+    def setup(self):
+        # Load the state between runs.
+        self.env.saw.LoadState()
+
+    def _all_closed(self):
+        line_data = self.env.saw.GetParametersMultipleElement(
+            'branch', self.env.branch_key_fields+['LineStatus'])
+
+        self.assertTrue((line_data['LineStatus'] == 'Closed').all())
+
+    def _one_open(self):
+        line_data = self.env.saw.GetParametersMultipleElement(
+            'branch', self.env.branch_key_fields+['LineStatus'])
+
+        # Ensure we have a single open line.
+        closed = line_data['LineStatus'] == 'Closed'
+        self.assertFalse(closed.all())
+        self.assertEqual(1, line_data[~closed].shape[0])
+
+    def test_set_branches_for_scenario(self):
+        # Ensure the init data shows all lines closed.
+        self.assertTrue(
+            (self.env.branch_init_data['LineStatus'] == 'Closed').all())
+
+        # Ensure the lines are actually all closed right now.
+        self._all_closed()
+
+        # Run the method.
+        self.env._set_branches_for_scenario()
+
+        # Ensure a single line is open.
+        self._one_open()
+
+    def test_reset_opens_branch(self):
+        """Ensure a branch is opened after calling reset."""
+        # Ensure all closed now.
+        self._all_closed()
+
+        # Run reset.
+        self.env.reset()
+
+        # One line should be open.
+        self._one_open()
+
 if __name__ == '__main__':
     unittest.main()

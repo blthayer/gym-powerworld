@@ -746,10 +746,11 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             # stuck in a low voltage solution from a previous solve.
             self.saw.LoadState()
 
-            # Get generators and loads set up for this scenario.
+            # Get generators, loads, and lines set up for this scenario.
             # noinspection PyArgumentList
             self._set_gens_for_scenario()
             self._set_loads_for_scenario()
+            self._set_branches_for_scenario()
 
             # Solve the power flow.
             try:
@@ -1139,6 +1140,13 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         loads.loc[:, 'LoadSMW'] = self.loads_mw[self.scenario_idx, :]
         loads.loc[:, 'LoadSMVR'] = self.loads_mvar[self.scenario_idx, :]
         self.saw.change_parameters_multiple_element_df('load', loads)
+
+    def _set_branches_for_scenario(self):
+        """Helper to set up lines. Most subclasses will do nothing.
+        In the future, this should be made to more closely follow the
+        pattern of _set_gens_for_scenario and _set_loads_for_scenario.
+        """
+        pass
 
     def _check_done(self):
         """Check whether (True) or not (False) and episode is done. Call
@@ -2148,6 +2156,30 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         simply give a single instance of the "diverged" penalty.
         """
         return self.rewards['diverged']
+
+
+class GridMindContingenciesEnv(GridMindEnv):
+    """GridMind environment, but with hard-coded contingencies. This
+    is hard-coded to work only with the IEEE 14 bus case."""
+    # Get line status.
+    BRANCH_INIT_FIELDS = ['LineStatus']
+
+    # In the paper, the allowed lines are 1-5, 2-3, 4-5, and 7-9.
+    LINES_TO_OPEN = [[1, 5, '1'], [2, 3, '1'], [4, 5, '1'], [7, 9, '1']]
+
+    def _set_branches_for_scenario(self):
+        """Open a random line."""
+        # Draw a line. Not using "choice" to pull an element since it
+        # changes data types and casts to a numpy array, when we just
+        # want a list.
+        line = self.LINES_TO_OPEN[self.rng.choice(len(self.LINES_TO_OPEN))]
+
+        # Open the line.
+        self.saw.ChangeParametersSingleElement(
+            ObjectType='branch',
+            ParamList=['BusNum', 'BusNum:1', 'LineCircuit', 'LineStatus'],
+            Values=line+['Open']
+        )
 
 
 class GridMindHardEnv(GridMindEnv):
