@@ -801,11 +801,15 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             # An action was taken, so include both the action and
             # failure penalties.
             reward = self._compute_failed_pf_reward()
+            info = {'is_success': False}
         else:
             # The power flow successfully solved. Compute the reward
             # and check to see if this episode is done.
             reward = self._compute_reward()
             done = self._check_done()
+
+            if done and self.all_v_in_range:
+                info = {'is_success': False}
 
         # Some subclasses may wish to add an end of episode reward.
         if done:
@@ -820,7 +824,8 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # TODO: update the fourth return (info) to, you know, actually
         #   give info.
         # That's it.
-        return obs, reward, done, dict()
+        # noinspection PyUnboundLocalVariable
+        return obs, reward, done, info
 
     def close(self):
         """Tear down SimAuto wrapper, flush the log."""
