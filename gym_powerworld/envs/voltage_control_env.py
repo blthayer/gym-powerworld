@@ -757,7 +757,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                 obs = self._solve_and_observe()
             except (PowerWorldError, LowVoltageError) as exc:
                 # This scenario is bad. Move on.
-                self.log.debug(
+                self.log.warning(
                     f'Scenario {self.scenario_idx} failed. Error message: '
                     f'{exc.args[0]}')
                 obs = None
