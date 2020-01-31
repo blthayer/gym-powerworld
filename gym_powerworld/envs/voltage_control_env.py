@@ -2182,9 +2182,10 @@ class GridMindContingenciesEnv(GridMindEnv):
         )
 
 
-class GridMindHardEnv(GridMindEnv):
+class GridMindHardEnv(GridMindContingenciesEnv):
     """Modified GridMind environment that uses the more difficult
-    loading and generation scenario generation.
+    loading and generation scenario generation. It also opens a random
+    line - see GridMindContingenciesEnv case.
     """
     _compute_loading = _compute_loading_robust
     _compute_generation = _compute_generation_and_dispatch
