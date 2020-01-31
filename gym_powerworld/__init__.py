@@ -14,3 +14,8 @@ register(
     id='powerworld-gridmind-hard-env-v0',
     entry_point='gym_powerworld.envs:GridMindHardEnv',
 )
+
+register(
+    id='powerworld-gridmind-contingencies-env-v0',
+    entry_point='gym_powerworld.envs:GridMindContingenciesEnv',
+)
