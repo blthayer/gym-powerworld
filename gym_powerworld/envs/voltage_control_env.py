@@ -810,6 +810,8 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
 
             if done and self.all_v_in_range:
                 info = {'is_success': False}
+            else:
+                info = dict()
 
         # Some subclasses may wish to add an end of episode reward.
         if done:
@@ -824,7 +826,6 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # TODO: update the fourth return (info) to, you know, actually
         #   give info.
         # That's it.
-        # noinspection PyUnboundLocalVariable
         return obs, reward, done, info
 
     def close(self):
