@@ -273,6 +273,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                  min_load_pf: float = 0.8,
                  lead_pf_probability: float = 0.1,
                  load_on_probability: float = 0.8,
+                 shunt_closed_probability: float = 0.6,
                  num_gen_voltage_bins: int = 5,
                  gen_voltage_range: Tuple[float, float] = (0.9, 1.1),
                  seed: float = None,
@@ -321,6 +322,9 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             to determine on a load by load basis which are "on" (i.e.
             have power consumption > 0). Should be a positive number
             on the interval (0, 1].
+        :param shunt_closed_probability: For each scenario, probability
+            to determine if shunts are closed. Should be on the
+            interval (0, 1].
         :param num_gen_voltage_bins: Number of intervals/bins to split
             generator voltage set points into. I.e.,
             if gen_voltage_range=(0.95, 1.05) and num_gen_voltage_bins
@@ -407,6 +411,10 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Load factors.
         self.min_load_factor = min_load_factor
         self.max_load_factor = max_load_factor
+
+        # Shunt probability.
+        self.shunt_closed_probability = shunt_closed_probability
+
         ################################################################
         # Rendering related stuff
         ################################################################
@@ -591,6 +599,11 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                                   lead_pf_probability=lead_pf_probability)
 
         ################################################################
+        # Scenario/episode initialization: shunts
+        ################################################################
+        self.shunt_states = self._compute_shunts()
+
+        ################################################################
         # Action space
         ################################################################
         # Start by creating the generator bins.
@@ -751,6 +764,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             self._set_gens_for_scenario()
             self._set_loads_for_scenario()
             self._set_branches_for_scenario()
+            self._set_shunts_for_scenario()
 
             # Solve the power flow.
             try:
@@ -1152,10 +1166,15 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self.saw.change_parameters_multiple_element_df('load', loads)
 
     def _set_branches_for_scenario(self):
-        """Helper to set up lines. Most subclasses will do nothing.
-        In the future, this should be made to more closely follow the
-        pattern of _set_gens_for_scenario and _set_loads_for_scenario.
+        """Helper to set up lines and/or taps. Some subclasses will do
+        nothing. In the future, this should be made to more closely
+        follow the pattern of _set_gens_for_scenario and
+        _set_loads_for_scenario.
         """
+        pass
+
+    def _set_shunts_for_scenario(self):
+        """Helper to set up shunts. Some subclasses will do nothing."""
         pass
 
     def _check_done(self):
@@ -1258,6 +1277,13 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     def _compute_gen_v_set_points(self):
         """Subclasses should implement this method to create an array
         of voltage set points for generators for each scenario.
+        """
+        pass
+
+    @abstractmethod
+    def _compute_shunts(self):
+        """Subclasses should implement this method to create an array
+        of shunt states.
         """
 
     @abstractmethod
@@ -1740,7 +1766,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     BRANCH_RESET_FIELDS = []
 
     # Shunt fields. TODO
-    SHUNT_INIT_FIELDS = []
+    SHUNT_INIT_FIELDS = ['AutoControl', 'SSCMode', 'SSStatus']
     SHUNT_OBS_FIELDS = []
     SHUNT_RESET_FIELDS = []
 
@@ -1781,6 +1807,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
                  min_load_pf: float = 0.8,
                  lead_pf_probability: float = 0.1,
                  load_on_probability: float = 0.8,
+                 shunt_closed_probability: float = 0.6,
                  num_gen_voltage_bins: int = 5,
                  gen_voltage_range: Tuple[float, float] = (0.9, 1.1),
                  seed: float = None,
@@ -1804,6 +1831,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
             min_load_pf=min_load_pf,
             lead_pf_probability=lead_pf_probability,
             load_on_probability=load_on_probability,
+            shunt_closed_probability=shunt_closed_probability,
             num_gen_voltage_bins=num_gen_voltage_bins,
             gen_voltage_range=gen_voltage_range,
             seed=seed, log_level=log_level, rewards=rewards,
@@ -1812,6 +1840,8 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
             render_interval=render_interval, log_buffer=log_buffer,
             csv_logfile=csv_logfile
         )
+        # TODO: Manage shunts. For example, turn off AutoControl, Only
+        #   switch 'discrete' shunts (ShuntMode), etc.
 
         ################################################################
         # Action space definition
@@ -1961,6 +1991,37 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     def _compute_failed_pf_reward(self):
         """Simply combine the fail and action rewards."""
         return self.rewards['fail'] + self.rewards['action']
+
+    def _compute_shunts(self):
+        """Set up shunts."""
+        if self.shunt_init_data is None:
+            # If there are no shunts, there's not work to do.
+            return None
+
+        # There are shunts. Draw from the uniform distribution, and
+        # consider any shunts < the prob. to be closed. So, True maps
+        # to closed, False maps to open.
+        return self.rng.uniform(0, 1, (self.num_scenarios, self.num_shunts)) \
+            < self.shunt_closed_probability
+
+    def _set_shunts_for_scenario(self):
+        """"""
+        # Don't do anything if there aren't any shunts.
+        if self.shunt_init_data is None:
+            return None
+
+        # Extract a subset of the shunt data.
+        shunts = self.shunt_init_data.loc[:, self.shunt_key_fields
+                                          + ['SSStatus']]
+
+        # Map the shunts.
+        s = pd.Series(self.shunt_states[self.scenario_idx, :],
+                      index=shunts.index)
+        shunts.loc[:, 'SSStatus'] = s.map({True: 'Closed', False: 'Open'})
+
+        # Send command to PowerWorld.
+        self.saw.change_parameters_multiple_element_df(
+            ObjectType='shunt', command_df=shunts)
 
 
 class GridMindEnv(DiscreteVoltageControlEnvBase):
@@ -2193,6 +2254,10 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         simply give a single instance of the "diverged" penalty.
         """
         return self.rewards['diverged']
+
+    def _compute_shunts(self):
+        """GridMind does not deal with shunts."""
+        pass
 
 
 class GridMindContingenciesEnv(GridMindEnv):

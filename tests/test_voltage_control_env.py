@@ -28,6 +28,9 @@ CONTOUR = os.path.join(DIR_14, 'contour.axd')
 # Case with 3 gens modeled as condensers:
 PWB_14_CONDENSERS = os.path.join(DIR_14, 'IEEE 14 bus condensers.pwb')
 
+# TX 2000
+PWB_2000 = os.path.join(CASE_DIR, 'tx_2000',
+                        'ACTIVSg2000_AUG-09-2018_Ride_version7.PWB')
 
 # Define some constants related to the IEEE 14 bus case.
 N_GENS_14 = 5
@@ -1947,6 +1950,113 @@ class GridMindContingenciesEnv14BusLineOpenTestCase(unittest.TestCase):
 
         # One line should be open.
         self._one_open()
+
+
+# noinspection DuplicatedCode
+class TX2000BusShuntsTapsTestCase(unittest.TestCase):
+    """Test case for shunts and taps in the Texas 2000 bus case.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 10
+        cls.max_load_factor = 1.2
+        cls.min_load_factor = 0.8
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.shunt_closed_probability = 0.6
+        cls.num_gen_voltage_bins = 5
+        cls.gen_voltage_range = (0.95, 1.05)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+        cls.log_buffer = 10
+        cls.csv_logfile = 'log.csv'
+
+        # Expected number of shunts.
+        cls.expected_shunts = 264
+
+        # Ensure we remove the logfile if it was created by other
+        # test cases.
+        try:
+            os.remove(cls.csv_logfile)
+        except FileNotFoundError:
+            pass
+
+        cls.env = voltage_control_env.DiscreteVoltageControlEnv(
+            pwb_path=PWB_2000, num_scenarios=cls.num_scenarios,
+            max_load_factor=cls.max_load_factor,
+            min_load_factor=cls.min_load_factor,
+            min_load_pf=cls.min_load_pf,
+            lead_pf_probability=cls.lead_pf_probability,
+            load_on_probability=cls.load_on_probability,
+            shunt_closed_probability=cls.shunt_closed_probability,
+            num_gen_voltage_bins=cls.num_gen_voltage_bins,
+            gen_voltage_range=cls.gen_voltage_range,
+            seed=cls.seed,
+            log_level=logging.INFO,
+            dtype=cls.dtype,
+            log_buffer=cls.log_buffer,
+            csv_logfile=cls.csv_logfile
+        )
+
+    def setUp(self) -> None:
+        self.env.saw.LoadState()
+        self.env.scenario_idx = 0
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.close()
+
+    def test_shunt_init_data(self):
+        """Ensure the right number of shunts have been picked up."""
+        self.assertEqual(self.env.shunt_init_data.shape[0],
+                         self.expected_shunts)
+
+    def test_shunt_shunt_states(self):
+        """Ensure the shunt_states attribute is as expected."""
+        # Check shape.
+        self.assertEqual(self.env.shunt_states.shape,
+                         (self.num_scenarios, self.expected_shunts))
+
+        # Ensure the "on" percentage is fairly close (say, within 5%).
+        on_pct = self.env.shunt_states.sum().sum() \
+            / (self.num_scenarios * self.expected_shunts)
+
+        self.assertGreaterEqual(on_pct, self.shunt_closed_probability - 0.05)
+        self.assertLessEqual(on_pct, self.shunt_closed_probability + 0.05)
+
+    def _shunt_helper(self, shunt_patch, state):
+        with patch.object(self.env, 'shunt_states', new=shunt_patch):
+            self.env._set_shunts_for_scenario()
+
+        # Retrieve.
+        df = self.env.saw.GetParametersMultipleElement(
+            'shunt', self.env.shunt_key_fields + ['SSStatus'])
+
+        self.assertTrue((df['SSStatus'] == state).all())
+
+    def test_set_shunts_for_scenario_closed(self):
+        """Ensure the shunt setting works properly."""
+        # Close all shunts.
+        shunt_patch = np.ones((self.num_scenarios, self.expected_shunts),
+                              dtype=bool)
+
+        self._shunt_helper(shunt_patch, 'Closed')
+
+    def test_set_shunts_for_scenario_open(self):
+        # Open all shunts.
+        shunt_patch = np.zeros((self.num_scenarios, self.expected_shunts),
+                               dtype=bool)
+
+        self._shunt_helper(shunt_patch, 'Open')
+
 
 if __name__ == '__main__':
     unittest.main()
