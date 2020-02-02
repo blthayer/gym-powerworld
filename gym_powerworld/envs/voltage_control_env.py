@@ -1488,10 +1488,6 @@ def _compute_generation_and_dispatch(self: DiscreteVoltageControlEnvBase) -> \
     # Loop over each scenario. This may not be the most efficient,
     # and could possible be vectorized.
     for scenario_idx in range(self.num_scenarios):
-        # Draw random indices for generators. In this way, we'll
-        # start with a different generator each time.
-        self.rng.shuffle(gen_indices)
-
         # Get our total load for this scenario. Multiply by losses
         # so the slack doesn't have to make up too much.
         load = self.total_load_mw[scenario_idx] * (1 + LOSS)
@@ -1505,21 +1501,31 @@ def _compute_generation_and_dispatch(self: DiscreteVoltageControlEnvBase) -> \
         # such that generation < load.
         i = 0
         while (abs(gen_delta) > GEN_LOAD_DELTA_TOL) and (i < ITERATION_MAX):
-            # Ensure generation is zeroed out from the last
-            # last iteration of the loop.
-            scenario_gen_mw[scenario_idx, :] = 0.0
+            # Draw random indices for generators. In this way, we'll
+            # start with a different generator each time.
+            self.rng.shuffle(gen_indices)
 
-            # Initialize the generation total to 0.
-            gen_total = 0
+            # # Ensure generation is zeroed out from the last
+            # # last iteration of the loop.
+            # scenario_gen_mw[scenario_idx, :] = 0.0
 
             # For each generator, draw a power level between its
             # minimum and maximum.
             for gen_idx in gen_indices:
                 # If this generator's minimum is greater than the delta,
+                # and we have not yet drawn for this generator,
                 # move along.
                 gen_min = self.gen_init_data.iloc[gen_idx]['GenMWMin']
-                if gen_min > -gen_delta:
+                if (gen_min > -gen_delta) and \
+                        (scenario_gen_mw[scenario_idx, gen_idx] == 0.0):
                     continue
+
+                # Update the "gen_min" in case we've already taken a
+                # pass.
+                gen_min = max(gen_min, scenario_gen_mw[scenario_idx, gen_idx])
+
+                # Clear this entry so the math is right later.
+                scenario_gen_mw[scenario_idx, gen_idx] = 0.0
 
                 # Draw generation between this generator's minimum
                 # and the minimum of the generator's maximum and
@@ -1529,13 +1535,13 @@ def _compute_generation_and_dispatch(self: DiscreteVoltageControlEnvBase) -> \
                     min(self.gen_init_data.iloc[gen_idx]['GenMWMax'], load))
 
                 # Place the generation in the appropriate spot.
-                if (gen_mw + gen_total) > load:
+                if (gen_mw + scenario_gen_mw[scenario_idx, :].sum()) > load:
                     # Generation cannot exceed load. Set this
                     # generator power output to the remaining load
                     # and break out of the loop. This will keep the
                     # remaining generators at 0.
                     scenario_gen_mw[scenario_idx, gen_idx] = \
-                        load - gen_total
+                        load - scenario_gen_mw[scenario_idx, :].sum()
 
                     # Update.
                     _update_gen_delta(idx_in=scenario_idx, load_in=load)
@@ -1546,9 +1552,6 @@ def _compute_generation_and_dispatch(self: DiscreteVoltageControlEnvBase) -> \
 
                 # Compute the delta.
                 _update_gen_delta(idx_in=scenario_idx, load_in=load)
-
-                # Increment the generation total.
-                gen_total += gen_mw
 
             i += 1
 
