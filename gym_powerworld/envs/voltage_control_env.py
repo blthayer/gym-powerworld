@@ -624,7 +624,9 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self.rewards = deepcopy(self.REWARDS)
         self._overwrite_rewards(rewards)
         self.current_reward = np.nan
-
+        # Initialize attribute for tracking episode cumulative rewards.
+        # It'll be reset in reset.
+        self.cumulative_reward = 0
         ################################################################
         # Action/State logging
         ################################################################
@@ -739,6 +741,9 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Clear the current reward.
         self.current_reward = np.nan
 
+        # Clear the cumulative reward.
+        self.cumulative_reward = 0
+
         done = False
 
         while (not done) & (self.scenario_idx < self.num_scenarios):
@@ -817,9 +822,17 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             if done and self.all_v_in_range:
                 info['is_success'] = True
 
+        # Update the cumulative reward for this episode.
+        self.cumulative_reward += reward
+
         # Some subclasses may wish to add an end of episode reward.
+        # Ensure this is done after updating the cumulative reward in
+        # case this reward depends on the cumulative reward.
         if done:
-            reward += self._compute_end_of_episode_reward()
+            eor = self._compute_end_of_episode_reward()
+            if eor is not None:
+                reward += eor
+                self.cumulative_reward += eor
 
         # Update current reward.
         self.current_reward = reward
@@ -827,8 +840,6 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Always log.
         self._add_to_log(action=action)
 
-        # TODO: update the fourth return (info) to, you know, actually
-        #   give info.
         # That's it.
         return obs, reward, done, info
 
@@ -2043,10 +2054,6 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
                  ):
         """See parent class for parameter descriptions.
         """
-        # Initialize attribute for tracking episode cumulative rewards.
-        # It'll be reset in _take_extra_reset_actions.
-        self.cumulative_reward = 0
-
         # Start by calling super constructor.
         super().__init__(
             pwb_path=pwb_path, num_scenarios=num_scenarios,
@@ -2176,8 +2183,8 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
             ObjectType='gen', command_df=self.gen_command_df)
 
     def _extra_reset_actions(self):
-        """Reset the cumulative reward."""
-        self.cumulative_reward = 0
+        """No extra reset actions needed."""
+        pass
 
     def _compute_end_of_episode_reward(self):
         """Simply cumulative reward divided by number of actions.

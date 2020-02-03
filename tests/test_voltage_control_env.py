@@ -1341,6 +1341,11 @@ class GridMindControlEnv14BusRewardTestCase(unittest.TestCase):
         """Override the relevant observation DataFrames, clear the
         cumulative reward.
         """
+        # Call reset and decrement the scenario index for consistency.
+        self.env.reset()
+        self.env.scenario_idx = 0
+
+        # Overwrite bus observations.
         # 6 buses with unity per unit voltage.
         v_df = pd.DataFrame(
             [[1., 'a'], [1., 'b'], [1., 'c'], [1., 'd'], [1., 'e'], [1., 'f']],
@@ -1390,6 +1395,33 @@ class GridMindControlEnv14BusRewardTestCase(unittest.TestCase):
         # "diverged" reward.
         self.assertEqual(reward, self.rewards['diverged'])
         self.assertEqual(self.rewards['diverged'], self.env.cumulative_reward)
+
+    def test_cumulative_reward_correct_under_failed_pf(self):
+        """Ensure the cumulative reward is correctly computed under
+        a failed power flow.
+        """
+        # Ensure the cumulative reward is 0.
+        self.assertEqual(0, self.env.cumulative_reward)
+
+        # Ensure the current reward is NaN.
+        self.assertTrue(np.isnan(self.env.current_reward))
+
+        # Patch solve and observe to throw an exception. Also patch
+        # _take_action to do nothing. Need to patch _add_to_log so it
+        # doesn't get upset about bad sized dataframe.
+        with patch.object(self.env, '_solve_and_observe',
+                          side_effect=PowerWorldError('bleh')):
+            with patch.object(self.env, '_take_action'):
+                with patch.object(self.env, '_add_to_log'):
+                    # Take a step.
+                    obs, rew, d, i = self.env.step(3)
+
+        # Current and cumulative rewards should be equal.
+        self.assertEqual(self.env.current_reward, self.env.cumulative_reward)
+
+        # Penalty should be equal to 2* the diverged reward.
+        self.assertEqual(self.rewards['diverged'] * 2,
+                         self.env.cumulative_reward)
 
 
 # noinspection DuplicatedCode
