@@ -554,6 +554,15 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self._zero_i_z_loads()
 
         ################################################################
+        # Shunt fields and data
+        ################################################################
+        # Turn of automatic control for all shunts.
+        if self.shunt_init_data is not None:
+            shunt_copy = self.shunt_init_data[self.shunt_key_fields].copy()
+            shunt_copy['AutoControl'] = 'NO'
+            self.saw.change_parameters_multiple_element_df('shunt', shunt_copy)
+
+        ################################################################
         # Minimum and maximum system loading
         ################################################################
         # Compute maximum system loading.
@@ -1776,9 +1785,11 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     BRANCH_OBS_FIELDS = []
     BRANCH_RESET_FIELDS = []
 
-    # Shunt fields. TODO
-    SHUNT_INIT_FIELDS = ['AutoControl', 'SSCMode', 'SSStatus']
-    SHUNT_OBS_FIELDS = []
+    # Shunt fields.
+    # Really only grabbing the AutoControl for testing purposes.
+    SHUNT_INIT_FIELDS = ['AutoControl']
+    # We'll be using the status for generating an observation.
+    SHUNT_OBS_FIELDS = ['SSStatus']
     SHUNT_RESET_FIELDS = []
 
     # Specify default rewards.

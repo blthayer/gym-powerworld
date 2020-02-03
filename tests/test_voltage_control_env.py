@@ -2089,6 +2089,22 @@ class TX2000BusShuntsTapsTestCase(unittest.TestCase):
 
         self._shunt_helper(shunt_patch, 'Open')
 
+    def test_auto_control_overridden_in_init(self):
+        """Ensure that all shunts have their AutoControl property
+        turned off after initialization.
+        """
+        # Ensure that some shunts did indeed start in auto mode.
+        self.assertTrue(
+            (self.env.shunt_init_data['AutoControl'] == 'YES').any())
+
+        # Fetch the current settings.
+        shunts = self.env.saw.GetParametersMultipleElement(
+            ObjectType='shunt',
+            ParamList=self.env.shunt_key_fields + ['AutoControl'])
+
+        # Now all shunts should not have auto control.
+        self.assertTrue((shunts['AutoControl'] == 'NO').all())
+
 
 if __name__ == '__main__':
     unittest.main()
