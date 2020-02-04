@@ -1362,7 +1362,6 @@ class GridMindControlEnv14BusRewardTestCase(unittest.TestCase):
         self.assertEqual(0, self.env.cumulative_reward)
         reward = self.env._compute_reward()
         self.assertEqual(reward, self.rewards['normal'])
-        self.assertEqual(self.rewards['normal'], self.env.cumulative_reward)
 
     def test_all_diverged(self):
         """All buses in diverged zone."""
@@ -1372,7 +1371,6 @@ class GridMindControlEnv14BusRewardTestCase(unittest.TestCase):
 
         reward = self.env._compute_reward()
         self.assertEqual(reward, self.rewards['diverged'])
-        self.assertEqual(self.rewards['diverged'], self.env.cumulative_reward)
 
     def test_all_violation(self):
         """All buses in violation zone."""
@@ -1382,7 +1380,6 @@ class GridMindControlEnv14BusRewardTestCase(unittest.TestCase):
 
         reward = self.env._compute_reward()
         self.assertEqual(reward, self.rewards['violation'])
-        self.assertEqual(self.rewards['violation'], self.env.cumulative_reward)
 
     def test_mixed(self):
         """Test a mixture of bus zones."""
@@ -1394,7 +1391,6 @@ class GridMindControlEnv14BusRewardTestCase(unittest.TestCase):
         # The presence of any diverged buses means we should get the
         # "diverged" reward.
         self.assertEqual(reward, self.rewards['diverged'])
-        self.assertEqual(self.rewards['diverged'], self.env.cumulative_reward)
 
     def test_cumulative_reward_correct_under_failed_pf(self):
         """Ensure the cumulative reward is correctly computed under
