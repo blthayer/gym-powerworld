@@ -63,8 +63,8 @@ def _set_gens_for_scenario_gen_mw_and_v_set_point(self) -> None:
         DiscreteVoltageControlEnvBase.
     """
     # Extract a subset of the generator data.
-    gens = self.gen_init_data.loc[:, self.gen_key_fields
-                                  + self.GEN_RESET_FIELDS].copy()
+    gens = self.gen_com_data.loc[:, self.gen_key_fields
+                                 + self.GEN_RESET_FIELDS]
 
     # Turn generators on/off and set their MW set points.
     gens.loc[:, 'GenMW'] = self.gen_mw[self.scenario_idx, :]
@@ -514,6 +514,15 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self._branch_init_data: Union[pd.DataFrame, None] = None
         self._shunt_init_data: Union[pd.DataFrame, None] = None
 
+        # Data for creating commands. This will be initialized to a
+        # copy of the init data, and then can safely be modified
+        # without overwriting data from the original case.
+        self.gen_com_data: Union[pd.DataFrame, None] = None
+        self.load_com_data: Union[pd.DataFrame, None] = None
+        self.bus_com_data: Union[pd.DataFrame, None] = None
+        self.branch_com_data: Union[pd.DataFrame, None] = None
+        self.shunt_com_data: Union[pd.DataFrame, None] = None
+
         # Data which will be used in observations.
         self.gen_obs_data: Union[pd.DataFrame, None] = None
         self.load_obs_data: Union[pd.DataFrame, None] = None
@@ -580,10 +589,13 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Shunt fields and data
         ################################################################
         # Turn of automatic control for all shunts.
-        if self.shunt_init_data is not None:
-            shunt_copy = self.shunt_init_data[self.shunt_key_fields].copy()
-            shunt_copy['AutoControl'] = 'NO'
-            self.saw.change_parameters_multiple_element_df('shunt', shunt_copy)
+        if self.num_shunts > 0:
+            # We'll tweak both the com_data and init_data as we're
+            # essentially tweaking the base case.
+            self.shunt_com_data['AutoControl'] = 'NO'
+            self.shunt_init_data['AutoControl'] = 'NO'
+            self.saw.change_parameters_multiple_element_df(
+                'shunt', self.shunt_com_data)
 
         ################################################################
         # Minimum and maximum system loading
@@ -1023,6 +1035,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         <obj>_obs_fields
         <obj>_reset_fields
         <obj>_init_data
+        <obj>_com_data
         num_<obj_plural>
         """
         for obj in ('gen', 'load', 'bus', 'branch', 'shunt'):
@@ -1048,8 +1061,8 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                     # class constant.
                     setattr(self, f'{obj}_{attr}_fields', kf + cc)
 
-            # Pull and set initialization data, as well as computing
-            # the number of elements present.
+            # Pull and set initialization and command data, as well as
+            # compute the number of elements present.
             data = self.saw.GetParametersMultipleElement(
                 ObjectType=obj,
                 ParamList=getattr(self, f'{obj}_init_fields'))
@@ -1059,6 +1072,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             # ESA will return None if the objects are not present.
             if data is not None:
                 setattr(self, f'_{obj}_init_data', data)
+                setattr(self, f'{obj}_com_data', data.copy(deep=True))
                 setattr(self, f'num_{plural}', data.shape[0])
             else:
                 setattr(self, f'num_{plural}', 0)
@@ -1067,10 +1081,13 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         """Helper to zero out generator MW limits which are < 0."""
         gen_less_0 = self.gen_init_data['GenMWMin'] < 0
         if (self.gen_init_data['GenMWMin'] < 0).any():
+            # In this case we'll zero out the initialization data since
+            # we're essentially modifying the base case.
             self.gen_init_data.loc[gen_less_0, 'GenMWMin'] = 0.0
+            self.gen_com_data.loc[gen_less_0, 'GenMWMin'] = 0.0
             self.saw.change_and_confirm_params_multiple_element(
-                'gen', self.gen_init_data.loc[:, self.gen_key_fields
-                                              + ['GenMWMin']])
+                'gen', self.gen_com_data.loc[:, self.gen_key_fields
+                                             + ['GenMWMin']])
             self.log.warning(f'{gen_less_0.sum()} generators with '
                              'GenMWMin < 0 have had GenMWMin set to 0.')
 
@@ -1085,9 +1102,12 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             self.log.warning('The given PowerWorld case has loads with '
                              'non-zero constant current and constant impedance'
                              ' portions. These will be zeroed out.')
+            # In this case we'll zero out the actual initialization data
+            # since we're effectively modifying the "base" case.
+            self.load_com_data.loc[:, LOAD_I_Z] = 0.0
             self.load_init_data.loc[:, LOAD_I_Z] = 0.0
             self.saw.change_and_confirm_params_multiple_element(
-                'Load', self.load_init_data.loc[:, self.load_key_fields
+                'Load', self.load_com_data.loc[:, self.load_key_fields
                                                 + LOAD_I_Z])
 
     def _check_max_load(self, max_load_factor):
@@ -1158,8 +1178,6 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     def _solve_and_observe(self):
         """Helper to solve the power flow and get an observation.
 
-        :raises LowVoltageError: If any bus voltage is below MIN_V after
-            solving the power flow.
         :raises PowerWorldError: If PowerWorld fails to solve the power
             flow.
         """
@@ -1207,7 +1225,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         This method should only be called by reset.
         """
         # Extract a subset of the load data.
-        loads = self.load_init_data.loc[:, self.load_key_fields
+        loads = self.load_com_data.loc[:, self.load_key_fields
                                         + self.LOAD_RESET_FIELDS]
 
         # Set P and Q.
@@ -1954,6 +1972,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         # -16 to 16 and a regulation range from 0.9 to 1.1.
         # TODO: Support more regulator configurations.
         if self.ltc_init_data is not None:
+            self.ltc_com_data = self.ltc_init_data.copy(deep=True)
             self.num_ltc = self.ltc_init_data.shape[0]
             assert (self.ltc_init_data['XFTapPos:1'] == -16.0).all()
             assert (self.ltc_init_data['XFTapPos:2'] == 16.0).all()
@@ -1963,6 +1982,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
             assert (self.ltc_init_data['XFTapMax'] == 1.1).all()
         else:
             self.num_ltc = 0
+            self.ltc_com_data = None
 
         ################################################################
         # Action space definition
@@ -2132,7 +2152,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
             return None
 
         # Extract a subset of the shunt data.
-        shunts = self.shunt_init_data.loc[:, self.shunt_key_fields
+        shunts = self.shunt_com_data.loc[:, self.shunt_key_fields
                                           + ['SSStatus']]
 
         # Map the shunts.
@@ -2275,10 +2295,6 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         ################################################################
         # Misc.
         ################################################################
-        # Create a copy of a subset of the gen data.
-        self.gen_command_df = \
-            self.gen_init_data[self.gen_key_fields].copy(deep=True)
-        self.gen_command_df['GenVoltSet'] = 0.0
 
         # Cap the actions per episode at 15 (co-author said 10-20 would
         # be fine, so split the difference).
@@ -2349,9 +2365,11 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         """Send the generator set points into PowerWorld.
         """
         # Update the command df.
-        self.gen_command_df['GenVoltSet'] = self.action_array[action, :]
+        self.gen_com_data['GenVoltSet'] = self.action_array[action, :]
         self.saw.change_parameters_multiple_element_df(
-            ObjectType='gen', command_df=self.gen_command_df)
+            ObjectType='gen',
+            command_df=self.gen_com_data[
+                self.gen_key_fields + ['GenVoltSet']])
 
     def _extra_reset_actions(self):
         """No extra reset actions needed."""
