@@ -2365,11 +2365,11 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         """Send the generator set points into PowerWorld.
         """
         # Update the command df.
-        self.gen_com_data['GenVoltSet'] = self.action_array[action, :]
+        self.gen_com_data.loc[:, 'GenVoltSet'] = self.action_array[action, :]
         self.saw.change_parameters_multiple_element_df(
             ObjectType='gen',
-            command_df=self.gen_com_data[
-                self.gen_key_fields + ['GenVoltSet']])
+            command_df=self.gen_com_data.loc[:, self.gen_key_fields
+                                             + ['GenVoltSet']])
 
     def _extra_reset_actions(self):
         """No extra reset actions needed."""
