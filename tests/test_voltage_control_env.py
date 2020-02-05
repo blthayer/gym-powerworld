@@ -30,7 +30,7 @@ PWB_14_CONDENSERS = os.path.join(DIR_14, 'IEEE 14 bus condensers.pwb')
 
 # TX 2000
 PWB_2000 = os.path.join(CASE_DIR, 'tx_2000',
-                        'ACTIVSg2000_AUG-09-2018_Ride_version7.PWB')
+                        'ACTIVSg2000_AUG-09-2018_Ride_mod.PWB')
 
 # Define some constants related to the IEEE 14 bus case.
 N_GENS_14 = 5
@@ -2104,6 +2104,142 @@ class TX2000BusShuntsTapsTestCase(unittest.TestCase):
 
         # Now all shunts should not have auto control.
         self.assertTrue((shunts['AutoControl'] == 'NO').all())
+
+    def test_ltc_data(self):
+        """Ensure we're getting the expected LTC data."""
+        # There should be 35 LTCs in the case.
+        self.assertEqual(35, self.env.ltc_init_data.shape[0])
+
+        # Fetch the integer (well, they're floats for whatever silly
+        # reason) min and max tap positions. They should come back as
+        # -16 to 16.
+        ltc = self.env.saw.GetParametersMultipleElement(
+            ObjectType='branch',
+            ParamList=(self.env.branch_key_fields
+                       + ['XFTapPos:1', 'XFTapPos:2']),
+            FilterName=self.env.ltc_filter
+        )
+
+        self.assertTrue((ltc['XFTapPos:1'] == -16.0).all())
+        self.assertTrue((ltc['XFTapPos:2'] == 16.0).all())
+
+    def test_change_taps(self):
+        """Test that changing taps creates the expected change in
+        voltage.
+        """
+        # We'll be hard-coding bus numbers for an LTC.
+        # b_f = 7402  # bus from
+        # b_t = 7401  # bus to
+        # b_f = 7423
+        # b_t = 7422
+        b_f = 8140
+        b_t = 8139
+        c = '1'     # circuit ID
+
+        # print(f'From bus: {b_f}')
+        # print(f'To bus: {b_t}')
+
+        # List of parameters for commanding.
+        c_list = ['BusNum', 'BusNum:1', 'LineCircuit', 'XFTapPos']
+
+        # Set the tap to 0 and solve the power flow.
+        self.env.saw.ChangeParametersSingleElement(
+            ObjectType='branch', ParamList=c_list, Values=[b_f, b_t, c, 0])
+
+        # Solve the power flow.
+        self.env.saw.SolvePowerFlow()
+
+        # Ensure the tap is in the right position and that the min and
+        # max are as expected.
+        # Ensure the tap changed.
+        xf = self.env.saw.GetParametersSingleElement(
+            ObjectType='branch',
+            ParamList=c_list + ['XFTapPos:1', 'XFTapPos:2', 'BusPUVolt',
+                                'BusPUVolt:1', 'LineAmp', 'LineR', 'LineX',
+                                'XFTapMin', 'XFTapMax'],
+            Values=([b_f, b_t, c] + [0] * 10))
+
+        self.assertEqual(xf['XFTapPos:1'], -16)
+        self.assertEqual(xf['XFTapPos:2'], 16)
+        self.assertEqual(xf['XFTapPos'], 0)
+        self.assertEqual(xf['XFTapMin'], 0.9)
+        self.assertEqual(xf['XFTapMax'], 1.1)
+
+        # Voltages should be almost equal.
+        # self.assertAlmostEqual(xf['BusPUVolt'], xf['BusPUVolt:1'], 2)
+        # print('With tap at 0:')
+        # print(xf['BusPUVolt'] / xf['BusPUVolt:1'])
+        # print(f"V1: {xf['BusPUVolt']:.3f}")
+        # print(f"V2: {xf['BusPUVolt:1']:.3f}")
+
+        # Put the tap at the maximum
+        self.env.saw.ChangeParametersSingleElement(
+            ObjectType='branch', ParamList=c_list, Values=[b_f, b_t, c, 16])
+
+        # Solve the power flow.
+        self.env.saw.SolvePowerFlow()
+
+        # Ensure the tap changed.
+        xf = self.env.saw.GetParametersSingleElement(
+            ObjectType='branch',
+            ParamList=c_list + ['BusPUVolt', 'BusPUVolt:1', 'XFTapPercent'],
+            Values=[b_f, b_t, c, 0, 0, 0, 0])
+
+        self.assertEqual(xf['XFTapPos'], 16)
+        self.assertEqual(xf['XFTapPercent'], 100.0)
+
+        # Ensure the first voltage is higher than the second.
+        self.assertTrue(xf['BusPUVolt'] > xf['BusPUVolt:1'])
+        # print('With tap at 16:')
+        # print(xf['BusPUVolt'] / xf['BusPUVolt:1'])
+        # print(f"V1: {xf['BusPUVolt']:.3f}")
+        # print(f"V2: {xf['BusPUVolt:1']:.3f}")
+
+        # The voltage out should be ~1.1 * the voltage in.
+        # self.assertAlmostEqual(xf['BusPUVolt'] * 1.1, xf['BusPUVolt:1'])
+
+        # Can't put the tap at the minimum without causing the power
+        # flow to diverge. Do -8 instead of -16.
+
+        # Put the tap low.
+        self.env.saw.ChangeParametersSingleElement(
+            ObjectType='branch', ParamList=c_list, Values=[b_f, b_t, c, -16])
+
+        self.env.saw.SolvePowerFlow()
+
+        # Ensure the tap changed.
+        xf = self.env.saw.GetParametersSingleElement(
+            ObjectType='branch',
+            ParamList=c_list + ['BusPUVolt', 'BusPUVolt:1', 'XFTapPercent'],
+            Values=[b_f, b_t, c, 0, 0, 0, 0])
+
+        self.assertEqual(xf['XFTapPos'], -16)
+        self.assertEqual(xf['XFTapPercent'], -100)
+
+        # Ensure the second voltage is higher than the first.
+        self.assertTrue(xf['BusPUVolt'] < xf['BusPUVolt:1'])
+        # print('With tap at -16:')
+        # print(xf['BusPUVolt'] / xf['BusPUVolt:1'])
+        # print(f"V1: {xf['BusPUVolt']:.3f}")
+        # print(f"V2: {xf['BusPUVolt:1']:.3f}")
+
+    def test_action_space(self):
+        """Ensure the action space is the correct size accounting for
+        gens, ltcs, and shunts.
+        """
+        self.assertTrue(False)
+
+    def test_action_ltc(self):
+        """Ensure an action corresponding to an LTC is handled
+        correctly.
+        """
+        self.assertTrue(False)
+
+    def test_action_shunt(self):
+        """Ensure an action corresponding to a shunt is handled
+        correctly.
+        """
+        self.assertTrue(False)
 
 
 if __name__ == '__main__':

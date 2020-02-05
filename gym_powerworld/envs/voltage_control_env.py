@@ -13,6 +13,9 @@ import matplotlib.pyplot as plt
 from matplotlib.image import AxesImage
 from PIL import Image
 
+# Get full path to this directory.
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # When generating scenarios, we're drawing random generation to meet
 # the load. There will be some rounding error, so set a reasonable
 # tolerance. Note this is in MW. In the power flow, the slack bus will
@@ -82,6 +85,29 @@ def _set_gens_for_scenario_gen_mw_and_v_set_point(self) -> None:
 
     # Nothing to return.
     return None
+
+
+def write_ltc_filter_aux_file(file_name) -> str:
+    """Helper to save an aux file which creates a branch filter to get
+    on load tap changing (LTC) transformers.
+
+    :param file_name: Path to save the .aux file.
+    :returns: Name of filter ("ltc_filter").
+    """
+    # String defining the filter.
+    s = \
+        """
+DATA (Filter, [ObjectType,FilterName,FilterLogic,Number,FilterPre,Enabled,DataMaintainerAssign])
+{
+"Branch" "ltc_filter" "AND" 1 "NO " "YES" ""
+   <SUBDATA Condition>
+     LineXFType = "LTC"
+   </SUBDATA>
+}"""
+    with open(file_name, 'w') as f:
+        f.write(s)
+
+    return "ltc_filter"
 
 
 # noinspection PyPep8Naming
@@ -1220,7 +1246,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # indices differently for if we're flushing the whole array
         # or a subset of it.
         if self.log_idx == self.log_buffer:
-            idx = self.log_idx+1
+            idx = self.log_idx + 1
         else:
             idx = self.log_idx
 
@@ -1792,6 +1818,12 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     SHUNT_OBS_FIELDS = ['SSStatus']
     SHUNT_RESET_FIELDS = []
 
+    # LTC fields.
+    LTC_INIT_FIELDS = ['XFAuto', 'XFRegMin', 'XFRegMax', 'XFTapMin',
+                       'XFTapMax', 'XFStep', 'XFTapPos', 'XFTapPos:1',
+                       'XFTapPos:2']
+    LTC_OBS_FIELDS = ['XFTapPos']
+
     # Specify default rewards.
     # NOTE: When computing rewards, all reward components will be
     #   treated with a positive sign. Thus, specify penalties in this
@@ -1862,8 +1894,34 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
             render_interval=render_interval, log_buffer=log_buffer,
             csv_logfile=csv_logfile
         )
-        # TODO: Manage shunts. For example, turn off AutoControl, Only
-        #   switch 'discrete' shunts (ShuntMode), etc.
+        ################################################################
+        # Get/set load tap changing (LTC) transformers.
+        ################################################################
+        # Write LTC filter to file.
+        ltc_file = os.path.join(THIS_DIR, 'ltc_filter.aux')
+        self.ltc_filter = write_ltc_filter_aux_file(ltc_file)
+
+        # Process the aux file.
+        self.saw.ProcessAuxFile(ltc_file)
+
+        # Get LTC data.
+        self.ltc_init_data = self.saw.GetParametersMultipleElement(
+            ObjectType='branch',
+            ParamList=self.branch_key_fields + self.LTC_INIT_FIELDS,
+            FilterName=self.ltc_filter
+        )
+        self.num_ltc = self.ltc_init_data.shape[0]
+
+        # For now, we'll only support regulators with taps from
+        # -16 to 16 and a regulation range from 0.9 to 1.1.
+        # TODO: Support more regulator configurations.
+        if self.ltc_init_data is not None:
+            assert (self.ltc_init_data['XFTapPos:1'] == -16.0).all()
+            assert (self.ltc_init_data['XFTapPos:2'] == 16.0).all()
+            assert (self.ltc_init_data['XFRegMin'] == 0.9).all()
+            assert (self.ltc_init_data['XFTapMin'] == 0.9).all()
+            assert (self.ltc_init_data['XFRegMax'] == 1.1).all()
+            assert (self.ltc_init_data['XFTapMax'] == 1.1).all()
 
         ################################################################
         # Action space definition
