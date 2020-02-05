@@ -686,37 +686,6 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
         # iteration).
         self.assertEqual(2, self.env.scenario_idx)
 
-    def test_low_voltage_skipped(self):
-        """Ensure that if a bus voltage comes back lower than allowed,
-        the case is skipped.
-        """
-        self.assertEqual(0, self.env.scenario_idx)
-
-        # Having trouble getting some good patching going in order to
-        # get _get_observation to set the bus_obs_data differently for each
-        # run. So, I'm going to do this the "bad" way and set up the
-        # first scenario such that all generators are off (the power
-        # flow will solve, but all buses have 0 pu voltage),
-        # and set up the second scenario to ensure the power flow will
-        # converge with all buses above the minimum threshold.
-        gen_mw = np.array([[0] * N_GENS_14,
-                           self.gens['GenMW'].tolist()])
-
-        load_mw = np.array([[100] * N_LOADS_14,
-                            self.loads['LoadSMW'].tolist()])
-
-        load_mvar = np.array([[0] * N_LOADS_14,
-                             self.loads['LoadSMVR'].tolist()])
-
-        # Patch the environment's generator and load scenario data.
-        with patch.object(self.env, 'gen_mw', new=gen_mw):
-            with patch.object(self.env, 'loads_mw', new=load_mw):
-                with patch.object(self.env, 'loads_mvar', new=load_mvar):
-                    self.env.reset()
-
-        # The scenario index should now be at 2.
-        self.assertEqual(2, self.env.scenario_idx)
-
     def test_hit_max_iterations(self):
         """Exception should be raised once all scenarios are exhausted.
         """

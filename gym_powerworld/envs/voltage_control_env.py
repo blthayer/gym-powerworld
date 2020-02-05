@@ -33,12 +33,6 @@ LOAD_I_Z = ['LoadIMW', 'LoadIMVR', 'LoadZMW', 'LoadZMVR']
 # Assumed transmission system losses as a fraction of energy delivered.
 LOSS = 0.03
 
-# Minimum allowed bus voltage (per unit) for a case. After solving the
-# power flow, voltages below this threshold will signify the case is
-# "bad." This will avoid weird behavior like PowerWorld converting loads
-# to constant current/impedance, etc.
-MIN_V = 0.75
-
 # Specify bus voltage bounds.
 LOW_V = 0.95
 HIGH_V = 1.05
@@ -760,7 +754,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             # Solve the power flow.
             try:
                 obs = self._solve_and_observe()
-            except (PowerWorldError, LowVoltageError) as exc:
+            except PowerWorldError as exc:
                 # This scenario is bad. Move on.
                 self.log.warning(
                     f'Scenario {self.scenario_idx} failed. Error message: '
@@ -801,7 +795,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Solve the power flow and get an observation.
         try:
             obs = self._solve_and_observe()
-        except (PowerWorldError, LowVoltageError):
+        except PowerWorldError:
             # The power flow failed to solve or bus voltages went below
             # the minimum. This episode is complete.
             #
@@ -1109,13 +1103,6 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
 
         # Get new observations, rotate old ones.
         self._rotate_and_get_observation_frames()
-
-        # If any voltages are too low, raise exception.
-        if (self.bus_obs_data['BusPUVolt'] < MIN_V).any():
-            num_low = (self.bus_obs_data['BusPUVolt'] < MIN_V).sum()
-            raise LowVoltageError(
-                f'{num_low} buses were below {MIN_V:.2f} p.u.'
-            )
 
         # Get and return a properly arranged observation.
         return self._get_observation()
@@ -2234,12 +2221,6 @@ class GridMindHardEnv(GridMindContingenciesEnv):
 class Error(Exception):
     """Base class for exceptions in this module."""
     pass
-
-
-class LowVoltageError(Error):
-    """Raised if any bus voltages go below MIN_V."""
-    pass
-
 
 class MinLoadBelowMinGenError(Error):
     """Raised if an environment's minimum possible load is below the
