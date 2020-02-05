@@ -28,6 +28,9 @@ CONTOUR = os.path.join(DIR_14, 'contour.axd')
 # Case with 3 gens modeled as condensers:
 PWB_14_CONDENSERS = os.path.join(DIR_14, 'IEEE 14 bus condensers.pwb')
 
+# Case with min and max MW limits on all 5 generators.
+PWB_14_LIMITS = os.path.join(DIR_14, 'IEEE 14 bus limits.pwb')
+
 # TX 2000
 PWB_2000 = os.path.join(CASE_DIR, 'tx_2000',
                         'ACTIVSg2000_AUG-09-2018_Ride_mod.PWB')
@@ -482,6 +485,68 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
 
 
 # noinspection DuplicatedCode
+class DiscreteVoltageControlEnv14BusLimitsTestCase(unittest.TestCase):
+    """Test initializing the environment with the 14 bus model with
+    limits added.
+    """
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        # Create a ton of scenarios so the generator dispatch is
+        # thoroughly exercised.
+        cls.num_scenarios = 100000
+        cls.max_load_factor = 1.44
+        cls.min_load_factor = 0.5
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.num_gen_voltage_bins = 9
+        cls.gen_voltage_range = (0.9, 1.1)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+        cls.log_buffer = 100
+
+        cls.env = voltage_control_env.DiscreteVoltageControlEnv(
+            pwb_path=PWB_14_LIMITS, num_scenarios=cls.num_scenarios,
+            max_load_factor=cls.max_load_factor,
+            min_load_factor=cls.min_load_factor,
+            min_load_pf=cls.min_load_pf,
+            lead_pf_probability=cls.lead_pf_probability,
+            load_on_probability=cls.load_on_probability,
+            num_gen_voltage_bins=cls.num_gen_voltage_bins,
+            gen_voltage_range=cls.gen_voltage_range,
+            seed=cls.seed,
+            log_level=logging.INFO,
+            dtype=cls.dtype,
+            log_buffer=cls.log_buffer
+        )
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.close()
+
+    def test_gens_in_bounds(self):
+        self.assertTrue(
+            (self.env.gen_mw
+             <= self.env.gen_init_data['GenMWMax'].to_numpy()).all()
+        )
+
+        self.assertTrue(
+            (self.env.gen_mw
+             >= self.env.gen_init_data['GenMWMin'].to_numpy()).all()
+        )
+
+    def test_gen_meets_load(self):
+        np.testing.assert_allclose(self.env.total_load_mw * (1 + LOSS),
+                                   self.env.gen_mw.sum(axis=1))
+
+
+# noinspection DuplicatedCode
 class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
     """Test the reset method of the environment."""
     @classmethod
@@ -674,12 +739,12 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
         """Ensure that if the power flow fails to solve, we move on
         to the next scenario.
         """
-        # Patch SolvePowerFlow so the first call raises a
-        # PowerWorldError but the second simply returns None (indicating
-        # success).
+        # Patch SolvePowerFlow so that the second call fails, while
+        # the first, third, and fourth succeed.
         with patch.object(
                 self.env.saw, 'SolvePowerFlow',
-                side_effect=[PowerWorldError('failure'), None]):
+                side_effect=[None, PowerWorldError('failure'), None,
+                             None]):
             self.env.reset()
 
         # Our first attempt should fail, and the second should succeed.
@@ -689,42 +754,13 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
         # iteration).
         self.assertEqual(2, self.env.scenario_idx)
 
-    def test_low_voltage_skipped(self):
-        """Ensure that if a bus voltage comes back lower than allowed,
-        the case is skipped.
-        """
-        self.assertEqual(0, self.env.scenario_idx)
-
-        # Having trouble getting some good patching going in order to
-        # get _get_observation to set the bus_obs_data differently for each
-        # run. So, I'm going to do this the "bad" way and set up the
-        # first scenario such that all generators are off (the power
-        # flow will solve, but all buses have 0 pu voltage),
-        # and set up the second scenario to ensure the power flow will
-        # converge with all buses above the minimum threshold.
-        gen_mw = np.array([[0] * N_GENS_14,
-                           self.gens['GenMW'].tolist()])
-
-        load_mw = np.array([[100] * N_LOADS_14,
-                            self.loads['LoadSMW'].tolist()])
-
-        load_mvar = np.array([[0] * N_LOADS_14,
-                             self.loads['LoadSMVR'].tolist()])
-
-        # Patch the environment's generator and load scenario data.
-        with patch.object(self.env, 'gen_mw', new=gen_mw):
-            with patch.object(self.env, 'loads_mw', new=load_mw):
-                with patch.object(self.env, 'loads_mvar', new=load_mvar):
-                    self.env.reset()
-
-        # The scenario index should now be at 2.
-        self.assertEqual(2, self.env.scenario_idx)
-
     def test_hit_max_iterations(self):
         """Exception should be raised once all scenarios are exhausted.
         """
+        # We want every other power flow solve to fail.
+        side_effect = [None, PowerWorldError('failure')] * 10
         with patch.object(self.env.saw, 'SolvePowerFlow',
-                          side_effect=PowerWorldError('failure')):
+                          side_effect=side_effect):
             with patch.object(self.env, 'num_scenarios', new=5):
                 with self.assertRaisesRegex(
                         OutOfScenariosError,
@@ -762,7 +798,8 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
 
     def test_set_loads_for_scenario_called(self):
         with patch.object(self.env, '_set_loads_for_scenario') as p:
-            self.env.reset()
+            with patch.object(self.env, '_solve_and_observe'):
+                self.env.reset()
 
         p.assert_called_once()
 
@@ -2236,6 +2273,75 @@ class TX2000BusShuntsTapsTestCase(unittest.TestCase):
         correctly.
         """
         self.assertTrue(False)
+
+#
+# # noinspection DuplicatedCode
+# class GridMindHardSolveTestCase(unittest.TestCase):
+#     """Ensure a certain percentage of hard cases are solvable."""
+#
+#     @classmethod
+#     def setUpClass(cls) -> None:
+#         # Initialize the environment. Then, we'll use individual test
+#         # methods to test various attributes, methods, etc.
+#
+#         # Define inputs to the constructor.
+#         cls.num_scenarios = 1000
+#         # 50% to 150% loading.
+#         cls.max_load_factor = 1.5
+#         cls.min_load_factor = 0.5
+#         cls.min_load_pf = 0.8
+#         cls.lead_pf_probability = 0.1
+#         cls.load_on_probability = 0.8
+#         cls.num_gen_voltage_bins = 5
+#         cls.gen_voltage_range = (0.95, 1.05)
+#         cls.seed = 18
+#         cls.log_level = logging.INFO
+#         cls.dtype = np.float32
+#         cls.log_buffer = 10
+#         cls.csv_logfile = 'log.csv'
+#
+#         # Ensure we remove the logfile if it was created by other
+#         # test cases.
+#         try:
+#             os.remove(cls.csv_logfile)
+#         except FileNotFoundError:
+#             pass
+#
+#         cls.rewards = {
+#             "normal": 100,
+#             "violation": -50,
+#             "diverged": -100
+#         }
+#
+#         cls.env = voltage_control_env.GridMindHardEnv(
+#             pwb_path=PWB_14_CONDENSERS, num_scenarios=cls.num_scenarios,
+#             max_load_factor=cls.max_load_factor,
+#             min_load_factor=cls.min_load_factor,
+#             min_load_pf=cls.min_load_pf,
+#             lead_pf_probability=cls.lead_pf_probability,
+#             load_on_probability=cls.load_on_probability,
+#             num_gen_voltage_bins=cls.num_gen_voltage_bins,
+#             gen_voltage_range=cls.gen_voltage_range,
+#             seed=cls.seed,
+#             log_level=logging.INFO,
+#             rewards=cls.rewards,
+#             dtype=cls.dtype,
+#             log_buffer=cls.log_buffer,
+#             csv_logfile=cls.csv_logfile
+#         )
+#
+#     # noinspection PyUnresolvedReferences
+#     @classmethod
+#     def tearDownClass(cls) -> None:
+#         cls.env.close()
+#
+#     def test_solve(self):
+#         while self.env.scenario_idx < self.env.num_scenarios:
+#             self.env.reset()
+#
+#         ratio = self.env.reset_successes / self.env.num_scenarios
+#         self.assertGreaterEqual(ratio, 0.9)
+#         print(f'Success ratio: {ratio:.3f}')
 
 
 if __name__ == '__main__':

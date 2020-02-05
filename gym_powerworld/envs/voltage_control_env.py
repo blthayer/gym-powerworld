@@ -36,12 +36,6 @@ LOAD_I_Z = ['LoadIMW', 'LoadIMVR', 'LoadZMW', 'LoadZMVR']
 # Assumed transmission system losses as a fraction of energy delivered.
 LOSS = 0.03
 
-# Minimum allowed bus voltage (per unit) for a case. After solving the
-# power flow, voltages below this threshold will signify the case is
-# "bad." This will avoid weird behavior like PowerWorld converting loads
-# to constant current/impedance, etc.
-MIN_V = 0.75
-
 # Specify bus voltage bounds.
 LOW_V = 0.95
 HIGH_V = 1.05
@@ -441,6 +435,9 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Shunt probability.
         self.shunt_closed_probability = shunt_closed_probability
 
+        # Track reset successes and failures.
+        self.reset_successes = 0
+        self.reset_failures = 0
         ################################################################
         # Rendering related stuff
         ################################################################
@@ -798,6 +795,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             # Load the initial state of the system to avoid getting
             # stuck in a low voltage solution from a previous solve.
             self.saw.LoadState()
+            self.saw.SolvePowerFlow()
 
             # Get generators, loads, and lines set up for this scenario.
             # noinspection PyArgumentList
@@ -809,15 +807,17 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             # Solve the power flow.
             try:
                 obs = self._solve_and_observe()
-            except (PowerWorldError, LowVoltageError) as exc:
+            except PowerWorldError as exc:
                 # This scenario is bad. Move on.
+                self.reset_failures += 1
                 self.log.warning(
                     f'Scenario {self.scenario_idx} failed. Error message: '
                     f'{exc.args[0]}')
                 obs = None
             else:
-                # Success! The power flow solved, and no voltages went
-                # below the minimum. Signify we're done looping.
+                # Success! The power flow solved. Signify we're done
+                # looping.
+                self.reset_successes += 1
                 done = True
             finally:
                 # Always increment the scenario index.
@@ -850,7 +850,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Solve the power flow and get an observation.
         try:
             obs = self._solve_and_observe()
-        except (PowerWorldError, LowVoltageError):
+        except PowerWorldError:
             # The power flow failed to solve or bus voltages went below
             # the minimum. This episode is complete.
             #
@@ -1094,13 +1094,24 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         """Ensure maximum loading is less than generation capacity. Also
         warn if generation capacity is >= 2 * maximum loading.
         """
-        if self.max_load_mw > self.gen_mw_capacity:
+        max_with_loss = self.max_load_mw * (1 + LOSS)
+        if max_with_loss >= self.gen_mw_capacity:
             raise MaxLoadAboveMaxGenError(
                 f'The given max_load_factor, {max_load_factor:.3f} '
-                f'resulted in maximum loading of {self.max_load_mw:.3f} MW'
-                ', but the generator active power capacity is only '
+                f'resulted in maximum loading of {max_with_loss:.3f} MW '
+                '(loss estimation included), but the generator active '
+                'power capacity is only '
                 f'{self.gen_mw_capacity:.3f} MW. Reduce the '
                 'max_load_factor and try again.')
+
+        load_gen_ratio = max_with_loss / self.gen_mw_capacity
+        if load_gen_ratio >= 0.98:
+            self.log.warning(
+                'The ratio of maximum loading (with a loss factor included) '
+                f'to the maximum generation is {load_gen_ratio:.2f}. Having '
+                'maximum load so near to maximum generation could result in '
+                'very slow scenario generation.'
+            )
 
         # Warn if our generation capacity is more than double the max
         # load - this could mean generator maxes aren't realistic.
@@ -1158,13 +1169,6 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
 
         # Get new observations, rotate old ones.
         self._rotate_and_get_observation_frames()
-
-        # If any voltages are too low, raise exception.
-        if (self.bus_obs_data['BusPUVolt'] < MIN_V).any():
-            num_low = (self.bus_obs_data['BusPUVolt'] < MIN_V).sum()
-            raise LowVoltageError(
-                f'{num_low} buses were below {MIN_V:.2f} p.u.'
-            )
 
         # Get and return a properly arranged observation.
         return self._get_observation()
@@ -1524,116 +1528,151 @@ def _compute_generation_and_dispatch(self: DiscreteVoltageControlEnvBase) -> \
     """
     Drop in replacement for _compute_generation in child classes of
     DiscreteVoltageControlEnvBase. This method simultaneously computes
-    generator commitment and dispatch by looping over each total
-    loading scenario and performing the following:
+    generator commitment and dispatch in a vectorized manner. The
+    process goes something like:
 
-    1. Shuffle list of generators.
+    1. Draw MW output for all generators between their minimum and
+    maximum for all scenarios.
 
-    2. Loop through shuffled list of generators.
+    2. Shuffle the generator order for each scenario.
 
-    3. Set generator's MW output to be between its minimum MW output
-    and the remaining load for this scenario. Note that the total
-    load is scaled by the LOSS factor to ensure the slack bus
-    doesn't need to pick up all the losses.
+    3. Compute a cumulative generation sum for each scenario. Once this
+    cumulative sum exceeds load, zero out remaining generator outputs
+    (effectively turning them off).
 
-    4. Continue dispatching generators in this fashion until load is
-    met.
+    4. For each scenario, proportionally reduce the MW output of all
+    generators such that generation meets load.
+
+    5. If this MW reduction resulted in some generators going below
+    their minimum, set these generators to their minimum. Go back to
+    the previous step, but only consider generators that are NOT at
+    their minimum for the proportional reduction.
 
     :param self: An initialized child class of
         DiscreteVoltageControlEnvBase.
     :returns: scenario_gen_mw
     """
-    # Initialize term to be used in the loop.
-    gen_delta = 0
+    # Extract generator minimums and maximums, expand them such that
+    # we have a row for each scenario. There may be a more memory
+    # efficient way to do this, but I haven't run out of memory yet :)
+    gen_min = np.tile(
+        self.gen_init_data['GenMWMin'].to_numpy(), (self.num_scenarios, 1))
+    gen_max = np.tile(
+        self.gen_init_data['GenMWMax'].to_numpy(), (self.num_scenarios, 1))
 
-    # Initialize the generator power levels to 0.
-    scenario_gen_mw = np.zeros((self.num_scenarios, self.num_gens))
+    # Get the loading for each scenario, multiply it by the loss factor.
+    load = self.total_load_mw * (1 + LOSS)
 
-    # Helper for updating gen_delta.
-    def _update_gen_delta(idx_in, load_in):
-        nonlocal gen_delta
-        gen_delta = scenario_gen_mw[idx_in, :].sum() - load_in
+    # Get the elementwise minimum between the generator maximums and the
+    # loading for each condition.
+    gen_max = np.minimum(gen_max, load[:, None])
 
-    # Initialize indices that we'll be shuffling.
-    gen_indices = np.arange(0, self.num_gens)
+    # Randomly draw generation between the minimum and maximum.
+    scenario_gen_mw = self.rng.uniform(gen_min, gen_max)
 
-    # Loop over each scenario. This may not be the most efficient,
-    # and could possible be vectorized.
-    for scenario_idx in range(self.num_scenarios):
-        # Get our total load for this scenario. Multiply by losses
-        # so the slack doesn't have to make up too much.
-        load = self.total_load_mw[scenario_idx] * (1 + LOSS)
+    # Get indices for shuffling the array row-wise.
+    # Sources:
+    # https://stackoverflow.com/a/45438143/11052174
+    # https://stackoverflow.com/a/55317373/11052174
+    shuffle_idx = self.rng.random(scenario_gen_mw.shape).argsort(-1)
 
-        # Compute the initial gen_delta. It will be recomputed at the
-        # inside the while loop.
-        _update_gen_delta(idx_in=scenario_idx, load_in=load)
+    # Shuffle the generation array, as well as the mins and maxes.
+    gen_shuffled = np.take_along_axis(scenario_gen_mw, shuffle_idx, 1)
+    gen_min_shuffled = np.take_along_axis(gen_min, shuffle_idx, 1)
+    gen_max_shuffled = np.take_along_axis(gen_max, shuffle_idx, 1)
 
-        # Randomly draw generation until we meet the load.
-        # The while loop is here in case we "under draw" generation
-        # such that generation < load.
-        i = 0
-        while (abs(gen_delta) > GEN_LOAD_DELTA_TOL) and (i < ITERATION_MAX):
-            # Draw random indices for generators. In this way, we'll
-            # start with a different generator each time.
-            self.rng.shuffle(gen_indices)
+    # Get the cumulative sum of the shuffled generation rows.
+    gen_cumsum = np.cumsum(gen_shuffled, axis=1)
 
-            # # Ensure generation is zeroed out from the last
-            # # last iteration of the loop.
-            # scenario_gen_mw[scenario_idx, :] = 0.0
+    # Compare with total load, g_l --> greater than load.
+    g_l = gen_cumsum >= load[:, None]
 
-            # For each generator, draw a power level between its
-            # minimum and maximum.
-            for gen_idx in gen_indices:
-                # If this generator's minimum is greater than the delta,
-                # and we have not yet drawn for this generator,
-                # move along.
-                gen_min = self.gen_init_data.iloc[gen_idx]['GenMWMin']
-                if (gen_min > -gen_delta) and \
-                        (scenario_gen_mw[scenario_idx, gen_idx] == 0.0):
-                    continue
+    # We need to loop until all scenarios have loading met.
+    it = 0
+    while it < 1000:
+        it += 1
+        # Check to see if the rows are capable of meeting generation.
+        # noinspection PyUnresolvedReferences
+        g_l_any = g_l.any(axis=1)
 
-                # Update the "gen_min" in case we've already taken a
-                # pass.
-                gen_min = max(gen_min, scenario_gen_mw[scenario_idx, gen_idx])
+        # If all rows meet generation, we're done.
+        if g_l_any.all():
+            break
 
-                # Clear this entry so the math is right later.
-                scenario_gen_mw[scenario_idx, gen_idx] = 0.0
+        # Bump up the minimums for the offending rows.
+        gen_min_shuffled[~g_l_any, :] = gen_shuffled[~g_l_any, :]
 
-                # Draw generation between this generator's minimum
-                # and the minimum of the generator's maximum and
-                # load.
-                gen_mw = self.rng.uniform(
-                    gen_min,
-                    min(self.gen_init_data.iloc[gen_idx]['GenMWMax'], load))
+        # Re-draw for the offending rows.
+        gen_shuffled[~g_l_any, :] = self.rng.uniform(
+            gen_min_shuffled[~g_l_any, :], gen_max_shuffled[~g_l_any, :]
+        )
 
-                # Place the generation in the appropriate spot.
-                if (gen_mw + scenario_gen_mw[scenario_idx, :].sum()) > load:
-                    # Generation cannot exceed load. Set this
-                    # generator power output to the remaining load
-                    # and break out of the loop. This will keep the
-                    # remaining generators at 0.
-                    scenario_gen_mw[scenario_idx, gen_idx] = \
-                        load - scenario_gen_mw[scenario_idx, :].sum()
+        # Re-compute the cumulative sum.
+        gen_cumsum = np.cumsum(gen_shuffled, axis=1)
 
-                    # Update.
-                    _update_gen_delta(idx_in=scenario_idx, load_in=load)
-                    break
-                else:
-                    # Use the randomly drawn gen_mw.
-                    scenario_gen_mw[scenario_idx, gen_idx] = gen_mw
+        # Compare with total load, g_l --> greater than load.
+        g_l = gen_cumsum >= load[:, None]
 
-                # Compute the delta.
-                _update_gen_delta(idx_in=scenario_idx, load_in=load)
+    if it >= 1000:
+        raise UserWarning(f'Hit 1000 iterations.')
 
-            i += 1
+    # Now, we need to zero out excess generation, and ensure each
+    # scenario exactly matches the given load (with losses).
+    #
+    # Start by getting the indices of the first column where generation
+    # exceeds load.
+    # noinspection PyUnresolvedReferences
+    gen_ex_load_idx = g_l.argmax(axis=1)
 
-        if i >= ITERATION_MAX:
-            raise ComputeGenMaxIterationsError(
-                f'Iterations exceeded {ITERATION_MAX}')
+    # Zero out excess generation.
+    gen_shuffled[
+        np.tile(np.arange(self.num_gens), (self.num_scenarios, 1))
+        > gen_ex_load_idx[:, None]] = 0.0
 
-        self.log.debug(f'It took {i} iterations to create generation for '
-                       f'scenario {scenario_idx}')
+    # Get mask of active generators.
+    active_mask = gen_shuffled > 0.0
 
+    # Fix up the minimum array.
+    gen_min_shuffled = np.take_along_axis(gen_min, shuffle_idx, 1)
+
+    # Now, reduce generation and ensure minimums are respected.
+    it = 0
+    while it < 1000:
+        it += 1
+        # Apportion that difference among all active generators that
+        # are not at their minimum.
+        viable = (gen_shuffled != gen_min_shuffled) & active_mask
+        num_viable = viable.sum(axis=1)
+        # Get the difference between generation and load. Repeat it so
+        # it has the same number of elements as are viable generators.
+        # TODO: This reduces the MW output for ALL viable generators by
+        #   the same amount. It may be more stable to allot more
+        #   reduction to generators which are further away from their
+        #   minimum. However, would this skew the randomness more?
+        diff = np.repeat((gen_shuffled.sum(axis=1) - load) / num_viable,
+                         num_viable)
+
+        gen_shuffled[viable] -= diff
+
+        # See if any generators violated their minimums after the
+        # reapportionment.
+        viol_min = gen_shuffled < gen_min_shuffled
+
+        # If there are no violations, we're done.
+        # noinspection PyUnresolvedReferences
+        if not viol_min.any():
+            break
+
+        # Set violating generators at their minimum.
+        gen_shuffled[viol_min] = gen_min_shuffled[viol_min]
+
+    if it >= 1000:
+        raise UserWarning(f'Hit 1000 iterations.')
+
+    # Place the shuffled generation back in place.
+    np.put_along_axis(scenario_gen_mw, shuffle_idx, gen_shuffled, 1)
+
+    # All done.
     return scenario_gen_mw
 
 
@@ -1910,18 +1949,20 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
             ParamList=self.branch_key_fields + self.LTC_INIT_FIELDS,
             FilterName=self.ltc_filter
         )
-        self.num_ltc = self.ltc_init_data.shape[0]
 
         # For now, we'll only support regulators with taps from
         # -16 to 16 and a regulation range from 0.9 to 1.1.
         # TODO: Support more regulator configurations.
         if self.ltc_init_data is not None:
+            self.num_ltc = self.ltc_init_data.shape[0]
             assert (self.ltc_init_data['XFTapPos:1'] == -16.0).all()
             assert (self.ltc_init_data['XFTapPos:2'] == 16.0).all()
             assert (self.ltc_init_data['XFRegMin'] == 0.9).all()
             assert (self.ltc_init_data['XFTapMin'] == 0.9).all()
             assert (self.ltc_init_data['XFRegMax'] == 1.1).all()
             assert (self.ltc_init_data['XFTapMax'] == 1.1).all()
+        else:
+            self.num_ltc = 0
 
         ################################################################
         # Action space definition
@@ -2370,11 +2411,6 @@ class GridMindHardEnv(GridMindContingenciesEnv):
 
 class Error(Exception):
     """Base class for exceptions in this module."""
-    pass
-
-
-class LowVoltageError(Error):
-    """Raised if any bus voltages go below MIN_V."""
     pass
 
 
