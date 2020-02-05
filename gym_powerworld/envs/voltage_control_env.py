@@ -2289,9 +2289,6 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         else:
             reward = self.rewards['violation']
 
-        # Bump the cumulative reward.
-        self.cumulative_reward += reward
-
         return reward
 
     def _get_observation(self) -> np.ndarray:
