@@ -401,6 +401,10 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Load factors.
         self.min_load_factor = min_load_factor
         self.max_load_factor = max_load_factor
+
+        # Track reset successes and failures.
+        self.reset_successes = 0
+        self.reset_failures = 0
         ################################################################
         # Rendering related stuff
         ################################################################
@@ -757,13 +761,15 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                 obs = self._solve_and_observe()
             except PowerWorldError as exc:
                 # This scenario is bad. Move on.
+                self.reset_failures += 1
                 self.log.warning(
                     f'Scenario {self.scenario_idx} failed. Error message: '
                     f'{exc.args[0]}')
                 obs = None
             else:
-                # Success! The power flow solved, and no voltages went
-                # below the minimum. Signify we're done looping.
+                # Success! The power flow solved. Signify we're done
+                # looping.
+                self.reset_successes += 1
                 done = True
             finally:
                 # Always increment the scenario index.

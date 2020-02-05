@@ -2012,5 +2012,75 @@ class GridMindContingenciesEnv14BusLineOpenTestCase(unittest.TestCase):
         # One line should be open.
         self._one_open()
 
+#
+# # noinspection DuplicatedCode
+# class GridMindHardSolveTestCase(unittest.TestCase):
+#     """Ensure a certain percentage of hard cases are solvable."""
+#
+#     @classmethod
+#     def setUpClass(cls) -> None:
+#         # Initialize the environment. Then, we'll use individual test
+#         # methods to test various attributes, methods, etc.
+#
+#         # Define inputs to the constructor.
+#         cls.num_scenarios = 1000
+#         # 50% to 150% loading.
+#         cls.max_load_factor = 1.5
+#         cls.min_load_factor = 0.5
+#         cls.min_load_pf = 0.8
+#         cls.lead_pf_probability = 0.1
+#         cls.load_on_probability = 0.8
+#         cls.num_gen_voltage_bins = 5
+#         cls.gen_voltage_range = (0.95, 1.05)
+#         cls.seed = 18
+#         cls.log_level = logging.INFO
+#         cls.dtype = np.float32
+#         cls.log_buffer = 10
+#         cls.csv_logfile = 'log.csv'
+#
+#         # Ensure we remove the logfile if it was created by other
+#         # test cases.
+#         try:
+#             os.remove(cls.csv_logfile)
+#         except FileNotFoundError:
+#             pass
+#
+#         cls.rewards = {
+#             "normal": 100,
+#             "violation": -50,
+#             "diverged": -100
+#         }
+#
+#         cls.env = voltage_control_env.GridMindHardEnv(
+#             pwb_path=PWB_14_CONDENSERS, num_scenarios=cls.num_scenarios,
+#             max_load_factor=cls.max_load_factor,
+#             min_load_factor=cls.min_load_factor,
+#             min_load_pf=cls.min_load_pf,
+#             lead_pf_probability=cls.lead_pf_probability,
+#             load_on_probability=cls.load_on_probability,
+#             num_gen_voltage_bins=cls.num_gen_voltage_bins,
+#             gen_voltage_range=cls.gen_voltage_range,
+#             seed=cls.seed,
+#             log_level=logging.INFO,
+#             rewards=cls.rewards,
+#             dtype=cls.dtype,
+#             log_buffer=cls.log_buffer,
+#             csv_logfile=cls.csv_logfile
+#         )
+#
+#     # noinspection PyUnresolvedReferences
+#     @classmethod
+#     def tearDownClass(cls) -> None:
+#         cls.env.close()
+#
+#     def test_solve(self):
+#         while self.env.scenario_idx < self.env.num_scenarios:
+#             self.env.reset()
+#
+#         ratio = self.env.reset_successes / self.env.num_scenarios
+#         self.assertGreaterEqual(ratio, 0.9)
+#         print(f'Success ratio: {ratio:.3f}')
+
+
 if __name__ == '__main__':
     unittest.main()
