@@ -744,6 +744,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             # Load the initial state of the system to avoid getting
             # stuck in a low voltage solution from a previous solve.
             self.saw.LoadState()
+            self.saw.SolvePowerFlow()
 
             # Get generators, loads, and lines set up for this scenario.
             # noinspection PyArgumentList

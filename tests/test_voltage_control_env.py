@@ -735,12 +735,12 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
         """Ensure that if the power flow fails to solve, we move on
         to the next scenario.
         """
-        # Patch SolvePowerFlow so the first call raises a
-        # PowerWorldError but the second simply returns None (indicating
-        # success).
+        # Patch SolvePowerFlow so that the second call fails, while
+        # the first, third, and fourth succeed.
         with patch.object(
                 self.env.saw, 'SolvePowerFlow',
-                side_effect=[PowerWorldError('failure'), None]):
+                side_effect=[None, PowerWorldError('failure'), None,
+                             None]):
             self.env.reset()
 
         # Our first attempt should fail, and the second should succeed.
@@ -753,8 +753,10 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
     def test_hit_max_iterations(self):
         """Exception should be raised once all scenarios are exhausted.
         """
+        # We want every other power flow solve to fail.
+        side_effect = [None, PowerWorldError('failure')] * 10
         with patch.object(self.env.saw, 'SolvePowerFlow',
-                          side_effect=PowerWorldError('failure')):
+                          side_effect=side_effect):
             with patch.object(self.env, 'num_scenarios', new=5):
                 with self.assertRaisesRegex(
                         OutOfScenariosError,
