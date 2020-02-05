@@ -28,5 +28,10 @@ buses 3, 6, and 8. This represents how the original case was intended to
 be, and also matches what the GridMind folks did in their work (they
 didn't dispatch real power from those generators in their scenarios).
 
+## IEEE 14 bus limits.PWB
+Arbitrary low and high MW limits have been added to all generators. 
+These limits truly are arbitrary, and should not be treated as realistic
+or anything beyond random.
+
 ## README.md
 This file.

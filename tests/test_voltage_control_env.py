@@ -28,6 +28,8 @@ CONTOUR = os.path.join(DIR_14, 'contour.axd')
 # Case with 3 gens modeled as condensers:
 PWB_14_CONDENSERS = os.path.join(DIR_14, 'IEEE 14 bus condensers.pwb')
 
+# Case with min and max MW limits on all 5 generators.
+PWB_14_LIMITS = os.path.join(DIR_14, 'IEEE 14 bus limits.pwb')
 
 # Define some constants related to the IEEE 14 bus case.
 N_GENS_14 = 5
@@ -479,6 +481,68 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
 
 
 # noinspection DuplicatedCode
+class DiscreteVoltageControlEnv14BusLimitsTestCase(unittest.TestCase):
+    """Test initializing the environment with the 14 bus model with
+    limits added.
+    """
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        # Create a ton of scenarios so the generator dispatch is
+        # thoroughly exercised.
+        cls.num_scenarios = 100000
+        cls.max_load_factor = 1.44
+        cls.min_load_factor = 0.5
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.num_gen_voltage_bins = 9
+        cls.gen_voltage_range = (0.9, 1.1)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+        cls.log_buffer = 100
+
+        cls.env = voltage_control_env.DiscreteVoltageControlEnv(
+            pwb_path=PWB_14_LIMITS, num_scenarios=cls.num_scenarios,
+            max_load_factor=cls.max_load_factor,
+            min_load_factor=cls.min_load_factor,
+            min_load_pf=cls.min_load_pf,
+            lead_pf_probability=cls.lead_pf_probability,
+            load_on_probability=cls.load_on_probability,
+            num_gen_voltage_bins=cls.num_gen_voltage_bins,
+            gen_voltage_range=cls.gen_voltage_range,
+            seed=cls.seed,
+            log_level=logging.INFO,
+            dtype=cls.dtype,
+            log_buffer=cls.log_buffer
+        )
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.close()
+
+    def test_gens_in_bounds(self):
+        self.assertTrue(
+            (self.env.gen_mw
+             <= self.env.gen_init_data['GenMWMax'].to_numpy()).all()
+        )
+
+        self.assertTrue(
+            (self.env.gen_mw
+             >= self.env.gen_init_data['GenMWMin'].to_numpy()).all()
+        )
+
+    def test_gen_meets_load(self):
+        np.testing.assert_allclose(self.env.total_load_mw * (1 + LOSS),
+                                   self.env.gen_mw.sum(axis=1))
+
+
+# noinspection DuplicatedCode
 class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
     """Test the reset method of the environment."""
     @classmethod
@@ -728,7 +792,8 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
 
     def test_set_loads_for_scenario_called(self):
         with patch.object(self.env, '_set_loads_for_scenario') as p:
-            self.env.reset()
+            with patch.object(self.env, '_solve_and_observe'):
+                self.env.reset()
 
         p.assert_called_once()
 
