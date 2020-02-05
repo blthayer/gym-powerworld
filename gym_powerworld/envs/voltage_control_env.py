@@ -1108,7 +1108,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             self.load_init_data.loc[:, LOAD_I_Z] = 0.0
             self.saw.change_and_confirm_params_multiple_element(
                 'Load', self.load_com_data.loc[:, self.load_key_fields
-                                                + LOAD_I_Z])
+                                               + LOAD_I_Z])
 
     def _check_max_load(self, max_load_factor):
         """Ensure maximum loading is less than generation capacity. Also
@@ -1226,7 +1226,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         """
         # Extract a subset of the load data.
         loads = self.load_com_data.loc[:, self.load_key_fields
-                                        + self.LOAD_RESET_FIELDS]
+                                       + self.LOAD_RESET_FIELDS]
 
         # Set P and Q.
         loads.loc[:, 'LoadSMW'] = self.loads_mw[self.scenario_idx, :]
@@ -2153,7 +2153,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
 
         # Extract a subset of the shunt data.
         shunts = self.shunt_com_data.loc[:, self.shunt_key_fields
-                                          + ['SSStatus']]
+                                         + ['SSStatus']]
 
         # Map the shunts.
         s = pd.Series(self.shunt_states[self.scenario_idx, :],
