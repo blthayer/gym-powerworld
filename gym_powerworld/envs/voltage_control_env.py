@@ -2007,45 +2007,15 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         "fail": -1000
     }
 
-    def __init__(self, pwb_path: str, num_scenarios: int,
-                 max_load_factor: float = None,
-                 min_load_factor: float = None,
-                 min_load_pf: float = 0.8,
-                 lead_pf_probability: float = 0.1,
-                 load_on_probability: float = 0.8,
-                 shunt_closed_probability: float = 0.6,
-                 num_gen_voltage_bins: int = 5,
-                 gen_voltage_range: Tuple[float, float] = (0.9, 1.1),
-                 seed: float = None,
-                 log_level=logging.INFO,
-                 rewards: Union[dict, None] = None,
-                 dtype=np.float32, low_v=LOW_V, high_v=HIGH_V,
-                 oneline_axd: str = None,
-                 contour_axd: str = None,
-                 image_dir: str = None,
-                 render_interval: float = 1.0,
-                 log_buffer: int = 10000,
-                 csv_logfile: str = 'log.csv'
-                 ):
+    def __init__(self, **kwargs):
         """See parent class for parameter definitions.
         """
 
         # Start by calling super constructor.
-        super().__init__(
-            pwb_path=pwb_path, num_scenarios=num_scenarios,
-            max_load_factor=max_load_factor, min_load_factor=min_load_factor,
-            min_load_pf=min_load_pf,
-            lead_pf_probability=lead_pf_probability,
-            load_on_probability=load_on_probability,
-            shunt_closed_probability=shunt_closed_probability,
-            num_gen_voltage_bins=num_gen_voltage_bins,
-            gen_voltage_range=gen_voltage_range,
-            seed=seed, log_level=log_level, rewards=rewards,
-            dtype=dtype, low_v=low_v, high_v=high_v, oneline_axd=oneline_axd,
-            contour_axd=contour_axd, image_dir=image_dir,
-            render_interval=render_interval, log_buffer=log_buffer,
-            csv_logfile=csv_logfile
-        )
+        super().__init__(**kwargs)
+
+        # Extract keyword arguments we need.
+        num_gen_voltage_bins = kwargs['num_gen_voltage_bins']
         ################################################################
         # Get/set load tap changing (LTC) transformers.
         ################################################################
@@ -2335,42 +2305,11 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         'diverged': -100
     }
 
-    def __init__(self, pwb_path: str, num_scenarios: int,
-                 max_load_factor: float = None,
-                 min_load_factor: float = None,
-                 min_load_pf: float = 0.8,
-                 lead_pf_probability: float = 0.1,
-                 load_on_probability: float = 0.8,
-                 num_gen_voltage_bins: int = 5,
-                 gen_voltage_range: Tuple[float, float] = (0.9, 1.1),
-                 seed: float = None,
-                 log_level=logging.INFO,
-                 rewards: Union[dict, None] = None,
-                 dtype=np.float32, low_v=LOW_V, high_v=HIGH_V,
-                 oneline_axd: str = None,
-                 contour_axd: str = None,
-                 image_dir: str = None,
-                 render_interval: float = 1.0,
-                 log_buffer: int = 10000,
-                 csv_logfile: str = 'log.csv'
-                 ):
+    def __init__(self, **kwargs):
         """See parent class for parameter descriptions.
         """
         # Start by calling super constructor.
-        super().__init__(
-            pwb_path=pwb_path, num_scenarios=num_scenarios,
-            max_load_factor=max_load_factor, min_load_factor=min_load_factor,
-            min_load_pf=min_load_pf,
-            lead_pf_probability=lead_pf_probability,
-            load_on_probability=load_on_probability,
-            num_gen_voltage_bins=num_gen_voltage_bins,
-            gen_voltage_range=gen_voltage_range,
-            seed=seed, log_level=log_level, rewards=rewards,
-            dtype=dtype, low_v=low_v, high_v=high_v, oneline_axd=oneline_axd,
-            contour_axd=contour_axd, image_dir=image_dir,
-            render_interval=render_interval, log_buffer=log_buffer,
-            csv_logfile=csv_logfile
-        )
+        super().__init__(**kwargs)
 
         ################################################################
         # Action space definition
@@ -2378,7 +2317,7 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         # The GridMind action space is all possible combinations of the
         # generator voltage bins.
         self.action_space = spaces.Discrete(
-            num_gen_voltage_bins ** self.num_gens)
+            kwargs['num_gen_voltage_bins'] ** self.num_gens)
 
         # Being lazy, just create an action array.
         # TODO: It's silly to store this giant array in memory when you

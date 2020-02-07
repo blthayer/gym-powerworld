@@ -447,6 +447,7 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
             pwb_path=PWB_14, num_scenarios=10,
             max_load_factor=self.max_load_factor,
             min_load_factor=self.min_load_factor,
+            num_gen_voltage_bins=5,
             rewards={'v_delta': 1000})
 
         # Loop and assert.
