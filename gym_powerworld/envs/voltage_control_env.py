@@ -1779,22 +1779,23 @@ def _compute_reward_based_on_movement(self: DiscreteVoltageControlEnvBase) ->\
     # to avoid changing set points if possible.
     reward = self.rewards['action']
 
+    # Get aliases for the voltages to simplify this gross method.
+    v_prev = self.bus_obs_data_prev['BusPUVolt']
+    v_now = self.bus_obs_data['BusPUVolt']
+
     # Compute the difference in the distance to nominal voltage for
     # all buses before and after the action. Multiply by 100 so that
-    # we reward change per 0.01 pu. A positive value indicates
-    # reducing the distance to nominal, while a negative value
-    # indicates increasing the distance to nominal.
+    # we reward change per 0.01 pu. Take the absolute value.
     nom_delta_diff = \
-        ((self.bus_obs_data_prev['BusPUVolt'] - NOMINAL_V).abs()
-         - (self.bus_obs_data['BusPUVolt'] - NOMINAL_V).abs()) * 100
+        ((v_prev - NOMINAL_V).abs() - (v_now - NOMINAL_V).abs()).abs() * 100
 
     # Get masks for bus voltages which are too high or too low for
     # both the previous (pre-action) data frame and the current
     # (post-action) data frame.
-    low_v_prev = self.bus_obs_data_prev['BusPUVolt'] < LOW_V
-    high_v_prev = self.bus_obs_data_prev['BusPUVolt'] > HIGH_V
-    low_v_now = self.bus_obs_data['BusPUVolt'] < LOW_V
-    high_v_now = self.bus_obs_data['BusPUVolt'] > HIGH_V
+    low_v_prev = v_prev < LOW_V
+    high_v_prev = v_prev > HIGH_V
+    low_v_now = v_now < LOW_V
+    high_v_now = v_now > HIGH_V
 
     # Get masks for voltages.
     in_prev = ~low_v_prev & ~high_v_prev  # in bounds before
@@ -1802,18 +1803,32 @@ def _compute_reward_based_on_movement(self: DiscreteVoltageControlEnvBase) ->\
     in_now = ~low_v_now & ~high_v_now     # in bounds now
     out_now = low_v_now | high_v_now      # out of bounds now
 
+    # Movement masks.
+    v_diff = v_prev - v_now
+    moved_up = v_diff < 0
+    moved_down = v_diff > 0
+
     # Now, get more "composite" masks
     in_out = in_prev & out_now          # in before, out now
     out_in = out_prev & in_now          # out before, in now
     in_out_low = in_prev & low_v_now    # in before, low now
     in_out_high = in_prev & high_v_now  # in before, high now
     # Out of bounds before, but moved in the right direction.
-    out_right_d = out_prev & nom_delta_diff[out_prev] > 0
+    out_right_d = (out_prev
+                   & ((high_v_prev & moved_down) | (low_v_prev & moved_up)))
+    # Out of bounds before, but moved in the wrong direction.
+    out_wrong_d = (out_prev
+                   & ((high_v_prev & moved_up) | (low_v_prev & moved_down)))
 
     # Give reward for voltages that were out of bounds, but moved in
     # the right direction, based on the change in distance from
     # nominal voltage.
     reward += (nom_delta_diff[out_right_d] * self.rewards['v_delta']).sum()
+
+    # Similarly, give a penalty for voltages that were out of bounds,
+    # and moved in the wrong direction, based on the change in distance
+    # from nominal voltage.
+    reward -= (nom_delta_diff[out_wrong_d] * self.rewards['v_delta']).sum()
 
     # Give penalty for voltages that were in bounds, but moved out
     # of bounds. Penalty should be based on how far away from the
