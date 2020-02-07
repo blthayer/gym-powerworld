@@ -2465,6 +2465,34 @@ class GridMindHardEnv(GridMindContingenciesEnv):
     _set_gens_for_scenario = _set_gens_for_scenario_gen_mw_and_v_set_point
 
 
+class DiscreteVoltageControlSimpleEnv(DiscreteVoltageControlEnv):
+    """Simplified version of the DiscreteVoltageControlEnv will use
+    only bus magnitudes for observations, and will only consider voltage
+    movement in the reward (no generator var reserves).
+    """
+    # Use only bus per unit voltages in the observations.
+    _get_observation = _get_observation_bus_pu_only
+    _get_observation_failed_pf = _get_observation_failed_pf_volt_only
+    _get_num_obs_and_space = _get_num_obs_space_v_only
+
+    # Use only bus voltage movement in the rewards.
+    _compute_reward = _compute_reward_volt_change
+
+
+class DiscreteVoltageControlSimple14BusEnv(DiscreteVoltageControlSimpleEnv):
+    """Include line contingencies to be consistent with the
+    GridMindHardEnv.
+    """
+    # Get line status.
+    BRANCH_INIT_FIELDS = ['LineStatus']
+
+    # In the paper, the allowed lines are 1-5, 2-3, 4-5, and 7-9.
+    LINES_TO_OPEN = ((1, 5, '1'), (2, 3, '1'), (4, 5, '1'), (7, 9, '1'))
+
+    # For each scenario, open a random line.
+    _set_branches_for_scenario = _set_branches_for_scenario_open_line
+
+
 class Error(Exception):
     """Base class for exceptions in this module."""
     pass
