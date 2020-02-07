@@ -1943,6 +1943,14 @@ def _get_num_obs_space_v_only(
         low=0, high=2, shape=(self.num_buses,), dtype=self.dtype)
 
 
+def _get_observation_failed_pf_volt_only(self: DiscreteVoltageControlEnvBase)\
+        -> np.ndarray:
+    """If the power flow fails to solve, return an observation of 0
+    voltages.
+    """
+    return np.zeros(self.num_buses, dtype=self.dtype)
+
+
 class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     """Environment for performing voltage control with the PowerWorld
     Simulator.
@@ -2065,7 +2073,8 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         # Action space definition
         ################################################################
         # TODO: Add shunts and regulators.
-        # Create action space by discretizing generator set points.
+        # Create action space by discretizing generator set points. Also
+        # include a single no-op action (hence the + 1).
         self.action_space = spaces.Discrete(self.num_gens
                                             * num_gen_voltage_bins + 1)
 
@@ -2399,9 +2408,7 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
 
         return reward
 
-    def _get_observation_failed_pf(self):
-        """Return 0 voltages."""
-        return np.zeros(self.num_buses, dtype=self.dtype)
+    _get_observation_failed_pf = _get_observation_failed_pf_volt_only
 
     def _take_action(self, action: int):
         """Send the generator set points into PowerWorld.
