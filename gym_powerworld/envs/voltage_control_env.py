@@ -438,6 +438,13 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Track reset successes and failures.
         self.reset_successes = 0
         self.reset_failures = 0
+
+        # No-op action. Subclasses should override if they wish to have
+        # a no-op action.
+        self.no_op_action = None
+
+        # Track the last action taken.
+        self.last_action = None
         ################################################################
         # Rendering related stuff
         ################################################################
@@ -801,6 +808,9 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Clear the cumulative reward.
         self.cumulative_reward = 0
 
+        # Clear the last action.
+        self.last_action = None
+
         done = False
 
         while (not done) & (self.scenario_idx < self.num_scenarios):
@@ -852,6 +862,9 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         """
         # Bump the action counter.
         self.action_count += 1
+
+        # Track the action.
+        self.last_action = action
 
         # Take the action.
         self._take_action(action)
@@ -1771,9 +1784,13 @@ def _compute_reward_based_on_movement(self: DiscreteVoltageControlEnvBase) ->\
 
     :returns: reward based on movement.
     """
-    # TODO: Add a "no-op" "path" --> get rewarded if all voltages are in
-    #   bounds and no action was taken, get penalized if no action was
-    #   taken but not all voltages are in bounds.
+    # If the action taken was the no-op action, give a simple reward
+    # if all voltages are in bounds, and a simple penalty otherwise.
+    if self.last_action == self.no_op_action:
+        if self.all_v_in_range:
+            return self.rewards['no_op']
+        else:
+            return -self.rewards['no_op']
 
     # First of all, any action gets us a negative reward. We'd like
     # to avoid changing set points if possible.
@@ -1905,6 +1922,9 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         # TODO: May want different penalties for different types of
         #   actions, e.g. changing gen set point vs. switching cap.
         "action": -10,
+        # If no action is taken, give a reward if all voltages are in
+        # bounds, otherwise penalize.
+        "no_op": 50,
         # Reward per 0.01 pu voltage movement in the right direction
         # (i.e. a voltage below the lower bound moving upward).
         "v_delta": 1,
@@ -2002,10 +2022,10 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         ################################################################
         # Action space definition
         ################################################################
-        # TODO: Add a "no-op" action.
+        # TODO: Add shunts and regulators.
         # Create action space by discretizing generator set points.
         self.action_space = spaces.Discrete(self.num_gens
-                                            * num_gen_voltage_bins)
+                                            * num_gen_voltage_bins + 1)
 
         # The action array is a simple mapping array which corresponds
         # 1:1 with the action_space. Each row represents an action,
@@ -2014,7 +2034,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         # memory use, the mapping can be computed on the fly rather
         # than stored in an array. For now, let's stick with a simple
         # approach.
-        self.action_array = np.zeros(shape=(self.action_space.n, 2),
+        self.action_array = np.zeros(shape=(self.action_space.n - 1, 2),
                                      dtype=int)
 
         # Repeat the generator indices in the first column of the
@@ -2062,11 +2082,15 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
             dtype=self.dtype)
 
         ################################################################
-        # Action cap
+        # Misc.
         ################################################################
         # Set the action cap to be double the number of generators.
         # TODO: Include other controllable assets, e.g. shunts/taps
         self._action_cap = 2 * self.num_gens
+
+        # No-op action will be 0.
+        self.no_op_action = 0
+
         # All done.
 
     @property
@@ -2083,7 +2107,13 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         """Helper to make the appropriate updates in PowerWorld for a
         given action.
         """
-        # TODO: Add a "no-op" action.
+        # The 0th action is a "do nothing" action.
+        if action == self.no_op_action:
+            return
+
+        # Subtract one from the action so we can use it as an index.
+        action -= 1
+
         # Look up action and send to PowerWorld.
         gen_idx = self.action_array[action, 0]
         voltage = self.gen_bins[self.action_array[action, 1]]

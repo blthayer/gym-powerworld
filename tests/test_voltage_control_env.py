@@ -363,8 +363,9 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
 
     def test_action_space(self):
         self.assertIsInstance(self.env.action_space, Discrete)
+        # Plus 1 because no-op action
         self.assertEqual(self.env.action_space.n,
-                         self.env.num_gens * self.num_gen_voltage_bins)
+                         self.env.num_gens * self.num_gen_voltage_bins + 1)
 
     def test_gen_bins(self):
         # Hard coding!
@@ -373,12 +374,13 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
             self.env.gen_bins)
 
     def test_action_array(self):
-        self.assertEqual(self.env.action_space.n,
+        # Minus 1 because no-op action.
+        self.assertEqual(self.env.action_space.n - 1,
                          self.env.action_array.shape[0])
         self.assertEqual(2, self.env.action_array.shape[1])
 
-        # Initialize array for comparison.
-        a = np.zeros(shape=(self.env.action_space.n, 2), dtype=int)
+        # Initialize array for comparison. Again, -1 due to no-op.
+        a = np.zeros(shape=(self.env.action_space.n - 1, 2), dtype=int)
         # Put generator indices in column 0.
         a[:, 0] = np.array(
             self.env.gen_init_data.index.tolist() * self.num_gen_voltage_bins)
@@ -483,6 +485,18 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
                          # and num gens.
                          (self.log_buffer, 14 + 3 + 5))
 
+    def test_no_op_action(self):
+        # Cover several data types because the action comes directly
+        # from a neural network, which could have different data types.
+        self.assertEqual(0, self.env.no_op_action)
+        self.assertEqual(0.0, self.env.no_op_action)
+        self.assertEqual(np.float64(0), self.env.no_op_action)
+        self.assertEqual(np.float32(0), self.env.no_op_action)
+        self.assertEqual(np.int(0.0), self.env.no_op_action)
+
+    def test_last_action(self):
+        self.assertIsNone(self.env.last_action)
+
 
 # noinspection DuplicatedCode
 class DiscreteVoltageControlEnv14BusLimitsTestCase(unittest.TestCase):
@@ -530,6 +544,7 @@ class DiscreteVoltageControlEnv14BusLimitsTestCase(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.env.close()
 
+    # noinspection PyUnresolvedReferences
     def test_gens_in_bounds(self):
         self.assertTrue(
             (self.env.gen_mw
@@ -814,6 +829,11 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
         self.env.reset()
         self.assertTrue(np.isnan(self.env.current_reward))
 
+    def test_last_action_cleared(self):
+        self.env.last_action = 7
+        self.env.reset()
+        self.assertIsNone(self.env.last_action)
+
 
 # noinspection DuplicatedCode
 class DiscreteVoltageControlEnv14BusStepTestCase(unittest.TestCase):
@@ -836,11 +856,14 @@ class DiscreteVoltageControlEnv14BusStepTestCase(unittest.TestCase):
         cls.log_level = logging.INFO
         cls.dtype = np.float32
 
+        cls.rewards = {'no_op': 50}
+
         cls.env = voltage_control_env.DiscreteVoltageControlEnv(
             pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
             max_load_factor=cls.max_load_factor,
             min_load_factor=cls.min_load_factor,
             min_load_pf=cls.min_load_pf,
+            rewards=cls.rewards,
             lead_pf_probability=cls.lead_pf_probability,
             load_on_probability=cls.load_on_probability,
             num_gen_voltage_bins=cls.num_gen_voltage_bins,
@@ -863,8 +886,15 @@ class DiscreteVoltageControlEnv14BusStepTestCase(unittest.TestCase):
 
     def action_helper(self, action, gen_bus, v_set):
         """Helper for testing that actions work correctly."""
+        # We call reset() in setUp, so that last_action should get
+        # reset.
+        self.assertIsNone(self.env.last_action)
+
         # Perform the step.
         self.env.step(action)
+
+        # Ensure the "last_action" is being performed properly.
+        self.assertEqual(action, self.env.last_action)
 
         # Hard-code access to the 0th generator. It's at bus 1.
         gen_init_data = self.env.saw.GetParametersSingleElement(
@@ -875,9 +905,31 @@ class DiscreteVoltageControlEnv14BusStepTestCase(unittest.TestCase):
         self.assertAlmostEqual(v_set, gen_init_data['GenVoltSet'], places=3)
 
     def test_action_0(self):
-        """Action 0 should set the 0th generator to the minimum."""
+        """Action 0 is the no-op action."""
+        # Call _solve_and_observe to rotate all the observation data.
+        self.env._solve_and_observe()
+
+        # Take the 0th action.
+        _, reward, _, _ = self.env.step(0)
+
+        # The observation DataFrames should be identical, indicating
+        # that no action was taken.
+        pd.testing.assert_frame_equal(
+            self.env.bus_obs_data_prev, self.env.bus_obs_data)
+        pd.testing.assert_frame_equal(
+            self.env.gen_obs_data_prev, self.env.gen_obs_data
+        )
+        pd.testing.assert_frame_equal(
+            self.env.load_obs_data_prev, self.env.load_obs_data
+        )
+
+        # The absolute value should be equal to the no-op reward.
+        self.assertEqual(self.rewards['no_op'], abs(reward))
+
+    def test_action_1(self):
+        """Action 1 should set the 0th generator to the minimum."""
         # The 0th generator is at bus 1.
-        self.action_helper(0, 1, self.gen_voltage_range[0])
+        self.action_helper(1, 1, self.gen_voltage_range[0])
 
     def test_action_last(self):
         """The last action should put the last generator to its maximum.
@@ -890,10 +942,10 @@ class DiscreteVoltageControlEnv14BusStepTestCase(unittest.TestCase):
         """Test an action not on the book ends and ensure the generator
         set point is updated correctly.
         """
-        # Action 17 should put the 3rd generator at the 4th voltage
+        # Action 18 should put the 3rd generator at the 4th voltage
         # level. The 3rd generator is at bus 3. Hard code the fact that
         # the bins are in 0.025pu increments.
-        self.action_helper(17, 3, self.gen_voltage_range[0] + 3 * 0.025)
+        self.action_helper(18, 3, self.gen_voltage_range[0] + 3 * 0.025)
 
     def test_action_count_increments(self):
         """Ensure each subsequent call to step bumps the action_count.
@@ -979,7 +1031,8 @@ class DiscreteVoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
             "v_in_bounds": 10,
             "v_out_bounds": -10,
             "gen_var_delta": 1,
-            "fail": -1000
+            "fail": -1000,
+            'no_op': 12
         }
 
         cls.env = voltage_control_env.DiscreteVoltageControlEnv(
@@ -1182,6 +1235,27 @@ class DiscreteVoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
             # Moved 0.01 pu away from lower boundary, also gets extra
             # penalty for leaving bounds.
             -1 * self.rewards['v_delta'] + self.rewards['v_out_bounds'])
+
+    def test_no_op_reward(self):
+        """With no violations, should receive the no_op reward if the
+        no_op action is the last_action and buses are within bounds.
+        """
+        with patch.object(self.env, 'last_action', 0):
+            r = self.env._compute_reward()
+
+        self.assertEqual(self.rewards['no_op'], r)
+
+    def test_no_op_penalty(self):
+        """With any violations, should receive the no_op penalty if the
+        no_op action is the last_action and any buses are out of bounds.
+        """
+        # Put one voltage below.
+        self.env.bus_obs_data.loc[0, 'BusPUVolt'] = 0.94
+
+        with patch.object(self.env, 'last_action', 0):
+            r = self.env._compute_reward()
+
+        self.assertEqual(self.rewards['no_op'], -r)
 
 
 # noinspection DuplicatedCode
@@ -1524,6 +1598,8 @@ class GridMindControlEnv14BusMiscTestCase(unittest.TestCase):
         np.testing.assert_array_equal(obs, np.array([1., 2.]))
 
     def test_take_action_0(self):
+        """Action 0 should put all gens at the minimum voltage.
+        """
         self.env._take_action(0)
         gens = self.env.saw.GetParametersMultipleElement(
             ObjectType='gen',
@@ -1533,6 +1609,8 @@ class GridMindControlEnv14BusMiscTestCase(unittest.TestCase):
                                    self.gen_voltage_range[0])
 
     def test_take_last_action(self):
+        """The last action should put all gens at the maximum voltage.
+        """
         self.env._take_action(self.env.action_space.n - 1)
         gens = self.env.saw.GetParametersMultipleElement(
             ObjectType='gen',
