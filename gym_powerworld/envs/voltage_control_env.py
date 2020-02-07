@@ -1784,16 +1784,9 @@ def _compute_gen_v_set_points_draw(self: DiscreteVoltageControlEnvBase) -> \
         self.gen_bins, size=(self.num_scenarios, self.num_gens), replace=True)
 
 
-def _compute_reward_based_on_movement(self: DiscreteVoltageControlEnvBase) ->\
+def _compute_reward_volt_change(self: DiscreteVoltageControlEnvBase) ->\
         float:
-    """Compute reward based on voltage and var loading movement. This
-    is a drop in replacement for the _compute_reward function of child
-    classes of DiscreteVoltageControlEnvBase.
-
-    :param self: An initialized child class of
-        DiscreteVoltageControlEnvBase.
-
-    :returns: reward based on movement.
+    """Compute reward based on voltage movement.
     """
     # If the action taken was the no-op action, give a simple reward
     # if all voltages are in bounds, and a simple penalty otherwise.
@@ -1872,6 +1865,13 @@ def _compute_reward_based_on_movement(self: DiscreteVoltageControlEnvBase) ->\
     # Give an extra reward for moving buses in bounds.
     reward += out_in.sum() * self.rewards['v_in_bounds']
 
+    # All done.
+    return reward
+
+
+def _compute_reward_gen_var_change(self: DiscreteVoltageControlEnvBase) \
+        -> float:
+    """Compute a reward based on how generator var loading changes."""
     # Give a positive reward for lessening generator var loading,
     # and a negative reward for increasing it.
     # TODO: This really should account for actual vars not just
@@ -1879,9 +1879,17 @@ def _compute_reward_based_on_movement(self: DiscreteVoltageControlEnvBase) ->\
     var_delta = (self.gen_obs_data_prev['GenMVRPercent']
                  - self.gen_obs_data['GenMVRPercent'])
 
-    reward += (var_delta * self.rewards['gen_var_delta']).sum()
+    return (var_delta * self.rewards['gen_var_delta']).sum()
 
-    # All done.
+
+def _compute_reward_volt_and_var_change(self: DiscreteVoltageControlEnvBase) \
+        -> float:
+    """Composite reward that accounts for both bus voltage movement and
+    generator var loading movement.
+    """
+    reward = 0
+    reward += _compute_reward_volt_change(self)
+    reward += _compute_reward_gen_var_change(self)
     return reward
 
 
@@ -1910,6 +1918,17 @@ def _set_branches_for_scenario_open_line(self: DiscreteVoltageControlEnvBase):
         ParamList=['BusNum', 'BusNum:1', 'LineCircuit', 'LineStatus'],
         Values=[*line, 'Open']
     )
+
+
+def _get_observation_bus_pu_only(self: DiscreteVoltageControlEnvBase) \
+        -> np.ndarray:
+    """After consulting with a co-author on the GridMind paper
+    (Jiajun Duan) I've confirmed that for this voltage control problem
+    the only input states are bus per unit voltage magnitudes, contrary
+    to what is listed in the paper (line flows (P and Q), bus voltages
+    (angle and magnitude)).
+    """
+    return self.bus_obs_data['BusPUVolt'].to_numpy(dtype=self.dtype)
 
 
 class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
@@ -2141,7 +2160,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     # Use helper functions to simplify the class definition.
     _compute_loading = _compute_loading_robust
     _compute_generation = _compute_generation_and_dispatch
-    _compute_reward = _compute_reward_based_on_movement
+    _compute_reward = _compute_reward_volt_and_var_change
     _compute_gen_v_set_points = _compute_gen_v_set_points_draw
 
     def _take_action(self, action):
@@ -2397,6 +2416,7 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
 
     _compute_loading = _compute_loading_gridmind
     _compute_generation = _compute_generation_gridmind
+    _get_observation = _get_observation_bus_pu_only
 
     def _set_gens_for_scenario(self):
         """Since we're using PowerWorld's participation factor AGC to
@@ -2436,15 +2456,6 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
             reward = self.rewards['violation']
 
         return reward
-
-    def _get_observation(self) -> np.ndarray:
-        """After consulting with a co-author on the paper (Jiajun Duan)
-        I've confirmed that for this voltage control problem the only
-        input states are bus per unit voltage magnitudes, contrary to
-        what is listed in the paper (line flows (P and Q), bus voltages
-        (angle and magnitude)).
-        """
-        return self.bus_obs_data['BusPUVolt'].to_numpy(dtype=self.dtype)
 
     def _get_observation_failed_pf(self):
         """Return 0 voltages."""
