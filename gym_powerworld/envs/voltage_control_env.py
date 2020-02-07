@@ -110,8 +110,6 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
 
     Subclasses must set the following attributes in __init__:
     - action_space
-    - num_obs
-    - observation_space
 
     Subclasses must implement the following methods:
     - _compute_loading
@@ -123,6 +121,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     - _extra_reset_actions
     - _compute_end_of_episode_reward
     - _compute_failed_pf_reward
+    - _get_num_obs_and_space
 
     Note that the initialization method of this class solves the power
     flow and calls the SaveState method, so subclasses may need to
@@ -686,8 +685,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         ################################################################
         # Observation space definition
         ################################################################
-        # Subclasses should set num_obs and observation_space
-        # attributes.
+        self.num_obs, self.observation_space = self._get_num_obs_and_space()
 
         # We'll track how many actions the agent has taken in an episode
         # as part of the stopping criteria.
@@ -1425,6 +1423,10 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         low voltages where we cannot trust the solution anymore),
         compute the reward (penalty).
         """
+    @abstractmethod
+    def _get_num_obs_and_space(self) -> Tuple[int, spaces.Space]:
+        """Return the number of observations, and an observation space.
+        """
 
 
 def _compute_loading_robust(self: DiscreteVoltageControlEnvBase,
@@ -1931,6 +1933,16 @@ def _get_observation_bus_pu_only(self: DiscreteVoltageControlEnvBase) \
     return self.bus_obs_data['BusPUVolt'].to_numpy(dtype=self.dtype)
 
 
+def _get_num_obs_space_v_only(
+        self: DiscreteVoltageControlEnvBase) -> Tuple[int, spaces.Box]:
+    """Number of observations is simply the number of buses,
+    observation space is a box for voltages.
+    """
+    # Voltages should never get above 2 p.u.
+    return self.num_buses, spaces.Box(
+        low=0, high=2, shape=(self.num_buses,), dtype=self.dtype)
+
+
 class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     """Environment for performing voltage control with the PowerWorld
     Simulator.
@@ -2080,38 +2092,6 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
                 i * self.num_gens:(i + 1) * self.num_gens, 1] = i
 
         ################################################################
-        # Observation space definition
-        ################################################################
-
-        # Time for the observation space. This will include:
-        #   - bus voltages
-        #   - generator active power output divided by maximum active
-        #       power output
-        #   - generator power factor
-        #   - generator portion of maximum reactive power
-        #   - load level (MW) divided by maximum MW loading
-        #   - load power factor
-        #   - flag (0/1) for if load power factor is lagging/leading
-        #
-        # We'll leave out a flag for generator lead/lag, because they
-        # will almost always be producing rather than consuming vars.
-        # May want to change this in the future.
-        self.num_obs = self.num_buses + 3 * self.num_gens + 3 * self.num_loads
-        # TODO: This is wrong. Several of these values can actually go
-        #   below zero.
-        low = np.zeros(self.num_obs, dtype=self.dtype)
-        # Put a cap of 2 p.u. voltage on observations - I don't see how
-        # bus voltages could ever get that high.
-        bus_high = np.ones(self.num_buses, dtype=self.dtype) + 1
-        # The rest will have a maximum of 1.
-        rest_high = np.ones(3 * self.num_gens + 3 * self.num_loads,
-                            dtype=self.dtype)
-        # Create the observation space.
-        self.observation_space = spaces.Box(
-            low=low, high=np.concatenate((bus_high, rest_high)),
-            dtype=self.dtype)
-
-        ################################################################
         # Misc.
         ################################################################
         # Set the action cap to be double the number of generators.
@@ -2132,6 +2112,39 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     _compute_generation = _compute_generation_and_dispatch
     _compute_reward = _compute_reward_volt_and_var_change
     _compute_gen_v_set_points = _compute_gen_v_set_points_draw
+
+    def _get_num_obs_and_space(self) -> Tuple[int, spaces.Space]:
+        ################################################################
+        # Observation space definition
+        ################################################################
+
+        # Time for the observation space. This will include:
+        #   - bus voltages
+        #   - generator active power output divided by maximum active
+        #       power output
+        #   - generator power factor
+        #   - generator portion of maximum reactive power
+        #   - load level (MW) divided by maximum MW loading
+        #   - load power factor
+        #   - flag (0/1) for if load power factor is lagging/leading
+        #
+        # We'll leave out a flag for generator lead/lag, because they
+        # will almost always be producing rather than consuming vars.
+        # May want to change this in the future.
+        num_obs = self.num_buses + 3 * self.num_gens + 3 * self.num_loads
+        # TODO: This is wrong. Several of these values can actually go
+        #   below zero.
+        low = np.zeros(num_obs, dtype=self.dtype)
+        # Put a cap of 2 p.u. voltage on observations - I don't see how
+        # bus voltages could ever get that high.
+        bus_high = np.ones(self.num_buses, dtype=self.dtype) + 1
+        # The rest will have a maximum of 1.
+        rest_high = np.ones(3 * self.num_gens + 3 * self.num_loads,
+                            dtype=self.dtype)
+
+        return num_obs, spaces.Box(
+            low=low, high=np.concatenate((bus_high, rest_high)),
+            dtype=self.dtype)
 
     def _take_action(self, action):
         """Helper to make the appropriate updates in PowerWorld for a
@@ -2327,17 +2340,6 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
             np.array(list(itertools.product(
                 *[self.gen_bins for _ in range(self.num_gens)])
             ))
-        ################################################################
-        # Observation space definition
-        ################################################################
-
-        # Time for the observation space. We're just going with bus
-        # voltage magnitudes.
-        self.num_obs = self.num_buses
-        # Put 2 as the maximum - there's no way we can get a bus to
-        # two p.u.
-        self.observation_space = spaces.Box(
-            low=0, high=2, shape=(self.num_obs,), dtype=self.dtype)
 
         ################################################################
         # Misc.
@@ -2353,6 +2355,7 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
     def action_cap(self) -> int:
         return self._action_cap
 
+    _get_num_obs_and_space = _get_num_obs_space_v_only
     _compute_loading = _compute_loading_gridmind
     _compute_generation = _compute_generation_gridmind
     _get_observation = _get_observation_bus_pu_only
