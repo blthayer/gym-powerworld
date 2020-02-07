@@ -1885,7 +1885,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
 
     # Shunt fields.
     # Really only grabbing the AutoControl for testing purposes.
-    SHUNT_INIT_FIELDS = ['AutoControl']
+    SHUNT_INIT_FIELDS = ['AutoControl', 'SSStatus']
     # We'll be using the status for generating an observation.
     SHUNT_OBS_FIELDS = ['SSStatus']
     SHUNT_RESET_FIELDS = []
