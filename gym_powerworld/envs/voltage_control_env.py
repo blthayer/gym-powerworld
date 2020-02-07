@@ -283,6 +283,17 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         """Subclasses should define an action_cap."""
         pass
 
+    @property
+    @abstractmethod
+    def LINES_TO_OPEN(self) -> Union[Tuple[Tuple[int, int, str]], None]:
+        """List of lists denoting lines that are allowed to be opened
+        during scenario initialization. Set to None or an empty list to
+        disable line opening. Each sub-list should have three elements:
+        from bus, to bus, and line circuit ID. These correspond to the
+        PowerWorld legacy variables BusNum, BusNum:1, LineCircuit
+        """
+        pass
+
     ####################################################################
     # Initialization
     ####################################################################
@@ -1874,6 +1885,33 @@ def _compute_reward_based_on_movement(self: DiscreteVoltageControlEnvBase) ->\
     return reward
 
 
+def _set_branches_for_scenario_open_line(self: DiscreteVoltageControlEnvBase):
+    """Open a random line from the LINES_TO_OPEN attribute, which is
+    a list containing line data.
+    """
+    # TODO: This method is not consistent with others that set things up
+    #   for a given scenario. Really, in initialization, a random choice
+    #   for each scenario should be drawn, and then this method simply
+    #   grabs the appropriate one and sends the command in to
+    #   PowerWorld.
+    # Do nothing if we have no lines to open.
+    if (self.LINES_TO_OPEN is None) or (len(self.LINES_TO_OPEN) == 0):
+        # Do nothing.
+        return
+
+    # Draw a line. Not using "choice" to pull an element since it
+    # changes data types and casts to a numpy array, when we just
+    # want a list.
+    line = self.LINES_TO_OPEN[self.rng.choice(len(self.LINES_TO_OPEN))]
+
+    # Open the line.
+    self.saw.ChangeParametersSingleElement(
+        ObjectType='branch',
+        ParamList=['BusNum', 'BusNum:1', 'LineCircuit', 'LineStatus'],
+        Values=[*line, 'Open']
+    )
+
+
 class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     """Environment for performing voltage control with the PowerWorld
     Simulator.
@@ -1899,6 +1937,9 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     BRANCH_INIT_FIELDS = []
     BRANCH_OBS_FIELDS = []
     BRANCH_RESET_FIELDS = []
+
+    # By default, do not open any lines.
+    LINES_TO_OPEN = None
 
     # Shunt fields.
     # Really only grabbing the AutoControl for testing purposes.
@@ -2256,6 +2297,9 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
     BRANCH_OBS_FIELDS = ['LineMW', 'LineMVR']
     BRANCH_RESET_FIELDS = []
 
+    # By default, do not open any lines.
+    LINES_TO_OPEN = None
+
     # Shunt fields. TODO
     SHUNT_INIT_FIELDS = []
     SHUNT_OBS_FIELDS = []
@@ -2444,21 +2488,10 @@ class GridMindContingenciesEnv(GridMindEnv):
     BRANCH_INIT_FIELDS = ['LineStatus']
 
     # In the paper, the allowed lines are 1-5, 2-3, 4-5, and 7-9.
-    LINES_TO_OPEN = [[1, 5, '1'], [2, 3, '1'], [4, 5, '1'], [7, 9, '1']]
+    LINES_TO_OPEN = ((1, 5, '1'), (2, 3, '1'), (4, 5, '1'), (7, 9, '1'))
 
-    def _set_branches_for_scenario(self):
-        """Open a random line."""
-        # Draw a line. Not using "choice" to pull an element since it
-        # changes data types and casts to a numpy array, when we just
-        # want a list.
-        line = self.LINES_TO_OPEN[self.rng.choice(len(self.LINES_TO_OPEN))]
-
-        # Open the line.
-        self.saw.ChangeParametersSingleElement(
-            ObjectType='branch',
-            ParamList=['BusNum', 'BusNum:1', 'LineCircuit', 'LineStatus'],
-            Values=line+['Open']
-        )
+    # For each scenario, open a random line.
+    _set_branches_for_scenario = _set_branches_for_scenario_open_line
 
 
 class GridMindHardEnv(GridMindContingenciesEnv):

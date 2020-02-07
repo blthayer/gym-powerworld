@@ -2183,6 +2183,7 @@ class TX2000BusShuntsTapsTestCase(unittest.TestCase):
         df = self.env.saw.GetParametersMultipleElement(
             'shunt', self.env.shunt_key_fields + ['SSStatus'])
 
+        # noinspection PyUnresolvedReferences
         self.assertTrue((df['SSStatus'] == state).all())
 
     def test_set_shunts_for_scenario_closed(self):
