@@ -24,3 +24,8 @@ register(
     id='powerworld-discrete-env-simple-14-bus-v0',
     entry_point='gym_powerworld.envs:DiscreteVoltageControlSimple14BusEnv',
 )
+
+register(
+    id='powerworld-discrete-env-gen-state-14-bus-v0',
+    entry_point='gym_powerworld.envs:DiscreteVoltageControlGenState14BusEnv',
+)

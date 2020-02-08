@@ -2097,6 +2097,104 @@ class GridMindContingenciesEnv14BusLineOpenTestCase(unittest.TestCase):
 
 
 # noinspection DuplicatedCode
+class DiscreteVoltageControlGenState14BusEnvTestCase(unittest.TestCase):
+    """Quick testing of DiscreteVoltageControlGenState14BusEnv."""
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 1000
+        cls.max_load_factor = 1.2
+        cls.min_load_factor = 0.8
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.num_gen_voltage_bins = 5
+        cls.gen_voltage_range = (0.95, 1.05)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+        cls.log_buffer = 10
+        cls.csv_logfile = 'log.csv'
+
+        # Ensure we remove the logfile if it was created by other
+        # test cases.
+        try:
+            os.remove(cls.csv_logfile)
+        except FileNotFoundError:
+            pass
+
+        cls.env = voltage_control_env.DiscreteVoltageControlGenState14BusEnv(
+            pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
+            max_load_factor=cls.max_load_factor,
+            min_load_factor=cls.min_load_factor,
+            min_load_pf=cls.min_load_pf,
+            lead_pf_probability=cls.lead_pf_probability,
+            load_on_probability=cls.load_on_probability,
+            num_gen_voltage_bins=cls.num_gen_voltage_bins,
+            gen_voltage_range=cls.gen_voltage_range,
+            seed=cls.seed,
+            log_level=logging.INFO,
+            dtype=cls.dtype,
+            log_buffer=cls.log_buffer,
+            csv_logfile=cls.csv_logfile
+        )
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.close()
+
+    def test_observation_shape(self):
+        self.assertEqual((14+5,), self.env.observation_space.shape)
+
+    def test_num_obs(self):
+        self.assertEqual(14+5, self.env.num_obs)
+
+    def test_get_observation(self):
+        """Patch the observation data frames and ensure we get back
+        what we expect.
+        """
+        v_arr = np.ones(14, dtype=self.env.dtype)
+        v_arr += 0.1
+        v = pd.DataFrame({'BusPUVolt': v_arr, 'BusNum': np.arange(1, 15)})
+
+        g_list = ['Closed'] * 5
+        g_list[1] = 'Open'
+        g_arr = np.ones(5, dtype=self.env.dtype)
+        g_arr[1] = 0
+
+        g = pd.DataFrame({'GenStatus': g_list, 'Bleh': [1] * 5})
+
+        with patch.object(self.env, 'bus_obs_data', v):
+            with patch.object(self.env, 'gen_obs_data', g):
+                obs = self.env._get_observation()
+
+        np.testing.assert_array_equal(v_arr, obs[0:14])
+
+        np.testing.assert_array_equal(g_arr, obs[14:])
+
+    def test_get_observation_failed_pf(self):
+        v_arr = np.zeros(14, dtype=self.env.dtype)
+
+        g_list = ['Closed'] * 5
+        g_list[3] = 'Open'
+        g_list[4] = 'Open'
+        g_arr = np.ones(5, dtype=self.env.dtype)
+        g_arr[3] = 0
+        g_arr[4] = 0
+
+        g = pd.DataFrame({'GenStatus': g_list, 'Stuff': [2] * 5})
+        with patch.object(self.env, 'gen_obs_data', g):
+            obs = self.env._get_observation_failed_pf()
+
+        np.testing.assert_array_equal(v_arr, obs[0:14])
+        np.testing.assert_array_equal(g_arr, obs[14:])
+
+
+# noinspection DuplicatedCode
 class TX2000BusShuntsTapsTestCase(unittest.TestCase):
     """Test case for shunts and taps in the Texas 2000 bus case.
     """

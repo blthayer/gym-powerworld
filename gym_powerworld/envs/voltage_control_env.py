@@ -1933,6 +1933,17 @@ def _get_observation_bus_pu_only(self: DiscreteVoltageControlEnvBase) \
     return self.bus_obs_data['BusPUVolt'].to_numpy(dtype=self.dtype)
 
 
+def _get_observation_bus_pu_and_gen_state(self: DiscreteVoltageControlEnvBase)\
+        -> np.ndarray:
+    """Observation is both bus per unit voltage and generator states.
+    """
+    out = np.zeros(self.observation_space.shape, dtype=self.dtype)
+    out[0:self.num_buses] = self.bus_obs_data['BusPUVolt'].to_numpy(
+        dtype=self.dtype)
+    out[self.num_buses:] = _get_gen_state(self)
+    return out
+
+
 def _get_num_obs_space_v_only(
         self: DiscreteVoltageControlEnvBase) -> Tuple[int, spaces.Box]:
     """Number of observations is simply the number of buses,
@@ -1943,12 +1954,43 @@ def _get_num_obs_space_v_only(
         low=0, high=2, shape=(self.num_buses,), dtype=self.dtype)
 
 
+def _get_num_obs_space_v_and_gen_state(
+        self: DiscreteVoltageControlEnvBase) -> Tuple[int, spaces.Box]:
+    """Number of observations is the number of buses plus the number of,
+    generators. Observation space is a box for voltages and generator
+    states.
+    """
+    # Voltages should never get above 2 p.u, while gen states will be
+    # either 0 or 1.
+    n = self.num_buses + self.num_gens
+    low = np.zeros(n)
+    high = np.ones(n)
+    high[0:self.num_buses] = 2
+    return n, spaces.Box(low=low, high=high, dtype=self.dtype)
+
+
 def _get_observation_failed_pf_volt_only(self: DiscreteVoltageControlEnvBase)\
         -> np.ndarray:
     """If the power flow fails to solve, return an observation of 0
     voltages.
     """
     return np.zeros(self.num_buses, dtype=self.dtype)
+
+
+def _get_observation_failed_pf_volt_and_gen_state(
+        self: DiscreteVoltageControlEnvBase) -> np.ndarray:
+    """If the power flow fails to solve, return an observation of 0
+    voltages, as well as the generator states.
+    """
+    out = np.zeros(self.observation_space.shape, dtype=self.dtype)
+    out[self.num_buses:] = _get_gen_state(self)
+    return out
+
+
+def _get_gen_state(self: DiscreteVoltageControlEnvBase) -> np.ndarray:
+    """Get the generator states as a vector."""
+    return (self.gen_obs_data['GenStatus'] == 'Closed').to_numpy(
+        dtype=self.dtype)
 
 
 class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
@@ -2491,6 +2533,16 @@ class DiscreteVoltageControlSimple14BusEnv(DiscreteVoltageControlSimpleEnv):
 
     # For each scenario, open a random line.
     _set_branches_for_scenario = _set_branches_for_scenario_open_line
+
+
+class DiscreteVoltageControlGenState14BusEnv(
+        DiscreteVoltageControlSimple14BusEnv):
+    """Identical to parent class, except generator states are included
+    in observations.
+    """
+    _get_observation = _get_observation_bus_pu_and_gen_state
+    _get_observation_failed_pf = _get_observation_failed_pf_volt_and_gen_state
+    _get_num_obs_and_space = _get_num_obs_space_v_and_gen_state
 
 
 class Error(Exception):
