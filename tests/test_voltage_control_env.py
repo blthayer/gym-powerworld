@@ -2148,9 +2148,20 @@ class DiscreteVoltageControlGenState14BusEnvTestCase(unittest.TestCase):
         cls.env.close()
 
     def test_observation_shape(self):
+        # 14 buses, 5 generators.
         self.assertEqual((14+5,), self.env.observation_space.shape)
 
+    def test_observation_bounds(self):
+        # All lower bounds should be 0.
+        np.testing.assert_array_equal(0, self.env.observation_space.low)
+        # Upper bounds corresponding to buses should be 2.
+        np.testing.assert_array_equal(2, self.env.observation_space.high[0:14])
+        # Remaining upper bounds correspond to generator states and
+        # should be at 1.
+        np.testing.assert_array_equal(1, self.env.observation_space.high[14:])
+
     def test_num_obs(self):
+        # 14 buses, 5 generators.
         self.assertEqual(14+5, self.env.num_obs)
 
     def test_get_observation(self):
@@ -2192,6 +2203,146 @@ class DiscreteVoltageControlGenState14BusEnvTestCase(unittest.TestCase):
 
         np.testing.assert_array_equal(v_arr, obs[0:14])
         np.testing.assert_array_equal(g_arr, obs[14:])
+
+
+# noinspection DuplicatedCode
+class DiscreteVoltageControlBranchState14BusEnvTestCase(unittest.TestCase):
+    """Quick testing of DiscreteVoltageControlBranchState14BusEnv."""
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 1000
+        cls.max_load_factor = 1.2
+        cls.min_load_factor = 0.8
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.num_gen_voltage_bins = 5
+        cls.gen_voltage_range = (0.95, 1.05)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+        cls.log_buffer = 10
+        cls.csv_logfile = 'log.csv'
+
+        # Ensure we remove the logfile if it was created by other
+        # test cases.
+        try:
+            os.remove(cls.csv_logfile)
+        except FileNotFoundError:
+            pass
+
+        cls.env = \
+            voltage_control_env.DiscreteVoltageControlBranchState14BusEnv(
+                pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
+                max_load_factor=cls.max_load_factor,
+                min_load_factor=cls.min_load_factor,
+                min_load_pf=cls.min_load_pf,
+                lead_pf_probability=cls.lead_pf_probability,
+                load_on_probability=cls.load_on_probability,
+                num_gen_voltage_bins=cls.num_gen_voltage_bins,
+                gen_voltage_range=cls.gen_voltage_range,
+                seed=cls.seed,
+                log_level=logging.INFO,
+                dtype=cls.dtype,
+                log_buffer=cls.log_buffer,
+                csv_logfile=cls.csv_logfile
+            )
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.close()
+
+    def setUp(self) -> None:
+        self.env.scenario_idx = 0
+        self.env.reset()
+
+    def test_observation_shape(self):
+        # 14 buses, 4 "openable" lines.
+        self.assertEqual((14+4,), self.env.observation_space.shape)
+
+    def test_observation_bounds(self):
+        # All lower bounds should be 0.
+        np.testing.assert_array_equal(0, self.env.observation_space.low)
+        # Upper bounds corresponding to buses should be 2.
+        np.testing.assert_array_equal(2, self.env.observation_space.high[0:14])
+        # Remaining upper bounds correspond to line states and
+        # should be at 1.
+        np.testing.assert_array_equal(1, self.env.observation_space.high[14:])
+
+    def test_num_obs(self):
+        # 14 buses, 4 lines to open.
+        self.assertEqual(14+4, self.env.num_obs)
+
+    def test_get_observation_and_get_observation_failed_pf(self):
+        # Get a copy of the line observation DataFrame.
+        branch_obs = self.env.branch_obs_data.copy(deep=True)
+        # Convert to multi-index to make selecting buses a bit
+        # simpler.
+        branch_obs.set_index(['BusNum', 'BusNum:1'], inplace=True)
+
+        # Open all the eligible lines in this DataFrame.
+        for l_t in self.env.LINES_TO_OPEN:
+            branch_obs.loc[(l_t[0], l_t[1]), 'LineStatus'] = 'Open'
+
+        # Patch the existing DataFrame, call _get_observation.
+        with patch.object(self.env, 'branch_obs_data',
+                          branch_obs.reset_index()):
+            obs = self.env._get_observation()
+            obs_failed = self.env._get_observation_failed_pf()
+
+        # The first 14 values correspond to bus voltages.
+        np.testing.assert_array_less(0, obs[0:14])
+        np.testing.assert_array_equal(0, obs_failed[0:14])
+
+        # The remaining correspond to line states, and should all be 0
+        # since we opened all the lines.
+        np.testing.assert_array_equal(0, obs[14:])
+        np.testing.assert_array_equal(0, obs_failed[14:])
+
+        # Now close all the lines.
+        for l_t in self.env.LINES_TO_OPEN:
+            branch_obs.loc[(l_t[0], l_t[1]), 'LineStatus'] = 'Closed'
+
+        # Patch the existing DataFrame, call _get_observation.
+        with patch.object(self.env, 'branch_obs_data',
+                          branch_obs.reset_index()):
+            obs = self.env._get_observation()
+            obs_failed = self.env._get_observation_failed_pf()
+
+        # The first 14 values correspond to bus voltages.
+        np.testing.assert_array_less(0, obs[0:14])
+        np.testing.assert_array_equal(0, obs_failed[0:14])
+
+        # The remaining correspond to line states, and should all be 1
+        # since we closed all the lines.
+        np.testing.assert_array_equal(1, obs[14:])
+        np.testing.assert_array_equal(1, obs_failed[14:])
+
+        # Open the second eligible single line.
+        l_t = self.env.LINES_TO_OPEN[1]
+        branch_obs.loc[(l_t[0], l_t[1]), 'LineStatus'] = 'Open'
+
+        # Patch the existing DataFrame, call _get_observation.
+        with patch.object(self.env, 'branch_obs_data',
+                          branch_obs.reset_index()):
+            obs = self.env._get_observation()
+            obs_failed = self.env._get_observation_failed_pf()
+
+        # The first 14 values correspond to bus voltages.
+        np.testing.assert_array_less(0, obs[0:14])
+        np.testing.assert_array_equal(0, obs_failed[0:14])
+
+        # The remaining correspond to line states. All but the second
+        # entry should be closed.
+        expected = np.ones(len(self.env.LINES_TO_OPEN), dtype=self.env.dtype)
+        expected[1] = 0
+        np.testing.assert_array_equal(expected, obs[14:])
+        np.testing.assert_array_equal(expected, obs_failed[14:])
 
 
 # noinspection DuplicatedCode

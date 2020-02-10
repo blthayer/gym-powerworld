@@ -54,6 +54,10 @@ PLURAL_MAP = {
 # For determining if we're "in bounds," round first.
 ROUND_DECIMALS = 6
 
+# Lines which are allowed to be opened in the 14 bus case for some
+# environments.
+LINES_TO_OPEN_14 = ((1, 5, '1'), (2, 3, '1'), (4, 5, '1'), (7, 9, '1'))
+
 
 def _set_gens_for_scenario_gen_mw_and_v_set_point(self) -> None:
     """Set generator Open/Closed states and set Gen MW setpoints based
@@ -781,18 +785,27 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         return self.bus_obs_data['BusPUVolt'].to_numpy(dtype=self.dtype)
 
     @property
-    def branch_state_arr(self) -> np.ndarray:
-        """Branch states (Open/Closed) as a numeric vector. Truthy
-        values  represent closed while falsey values represent open.
-        """
-        return (self.branch_obs_data['LineStatus'] == 'Closed').to_numpy(
-            dtype=self.dtype
-        )
-
-    @property
     def gen_volt_set_arr(self) -> np.ndarray:
         """Generator voltage setpoints as an array."""
         return self.gen_obs_data['GenVoltSet'].to_numpy(dtype=self.dtype)
+
+    @property
+    def gen_status_arr(self) -> np.ndarray:
+        """Get the generator states (Open/Closed) as a numeric vector.
+        Truthy values correspond to Closed, falsey values correspond to
+        Open.
+        """
+        return (self.gen_obs_data['GenStatus'] == 'Closed').to_numpy(
+            dtype=self.dtype)
+
+    @property
+    def branch_status_arr(self) -> np.ndarray:
+        """Get the branch (line) states (Open/Closed) as a numeric
+        vector. Truthy values correspond to Closed, falsey values
+        correspond to Open.
+        """
+        return (self.branch_obs_data['LineStatus'] == 'Closed').to_numpy(
+            dtype=self.dtype)
 
     ####################################################################
     # Public methods
@@ -1949,17 +1962,6 @@ def _get_observation_bus_pu_only(
     return self.bus_pu_volt_arr
 
 
-def _get_observation_bus_pu_and_gen_state(self: DiscreteVoltageControlEnvBase)\
-        -> np.ndarray:
-    """Observation is both bus per unit voltage and generator states.
-    """
-    out = np.zeros(self.observation_space.shape, dtype=self.dtype)
-    out[0:self.num_buses] = self.bus_obs_data['BusPUVolt'].to_numpy(
-        dtype=self.dtype)
-    out[self.num_buses:] = _get_gen_state(self)
-    return out
-
-
 def _get_num_obs_space_v_only(
         self: DiscreteVoltageControlEnvBase) -> Tuple[int, spaces.Box]:
     """Number of observations is simply the number of buses,
@@ -1970,43 +1972,12 @@ def _get_num_obs_space_v_only(
         low=0, high=2, shape=(self.num_buses,), dtype=self.dtype)
 
 
-def _get_num_obs_space_v_and_gen_state(
-        self: DiscreteVoltageControlEnvBase) -> Tuple[int, spaces.Box]:
-    """Number of observations is the number of buses plus the number of,
-    generators. Observation space is a box for voltages and generator
-    states.
-    """
-    # Voltages should never get above 2 p.u, while gen states will be
-    # either 0 or 1.
-    n = self.num_buses + self.num_gens
-    low = np.zeros(n)
-    high = np.ones(n)
-    high[0:self.num_buses] = 2
-    return n, spaces.Box(low=low, high=high, dtype=self.dtype)
-
-
 def _get_observation_failed_pf_volt_only(self: DiscreteVoltageControlEnvBase)\
         -> np.ndarray:
     """If the power flow fails to solve, return an observation of 0
     voltages.
     """
     return np.zeros(self.num_buses, dtype=self.dtype)
-
-
-def _get_observation_failed_pf_volt_and_gen_state(
-        self: DiscreteVoltageControlEnvBase) -> np.ndarray:
-    """If the power flow fails to solve, return an observation of 0
-    voltages, as well as the generator states.
-    """
-    out = np.zeros(self.observation_space.shape, dtype=self.dtype)
-    out[self.num_buses:] = _get_gen_state(self)
-    return out
-
-
-def _get_gen_state(self: DiscreteVoltageControlEnvBase) -> np.ndarray:
-    """Get the generator states as a vector."""
-    return (self.gen_obs_data['GenStatus'] == 'Closed').to_numpy(
-        dtype=self.dtype)
 
 
 class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
@@ -2512,7 +2483,7 @@ class GridMindContingenciesEnv(GridMindEnv):
     BRANCH_INIT_FIELDS = ['LineStatus']
 
     # In the paper, the allowed lines are 1-5, 2-3, 4-5, and 7-9.
-    LINES_TO_OPEN = ((1, 5, '1'), (2, 3, '1'), (4, 5, '1'), (7, 9, '1'))
+    LINES_TO_OPEN = LINES_TO_OPEN_14
 
     # For each scenario, open a random line.
     _set_branches_for_scenario = _set_branches_for_scenario_open_line
@@ -2551,7 +2522,7 @@ class DiscreteVoltageControlSimple14BusEnv(DiscreteVoltageControlSimpleEnv):
     BRANCH_INIT_FIELDS = ['LineStatus']
 
     # In the paper, the allowed lines are 1-5, 2-3, 4-5, and 7-9.
-    LINES_TO_OPEN = ((1, 5, '1'), (2, 3, '1'), (4, 5, '1'), (7, 9, '1'))
+    LINES_TO_OPEN = LINES_TO_OPEN_14
 
     # For each scenario, open a random line.
     _set_branches_for_scenario = _set_branches_for_scenario_open_line
@@ -2562,9 +2533,87 @@ class DiscreteVoltageControlGenState14BusEnv(
     """Identical to parent class, except generator states are included
     in observations.
     """
-    _get_observation = _get_observation_bus_pu_and_gen_state
-    _get_observation_failed_pf = _get_observation_failed_pf_volt_and_gen_state
-    _get_num_obs_and_space = _get_num_obs_space_v_and_gen_state
+    def _get_observation(self) -> np.ndarray:
+        """Observation is both bus per unit voltage and generator states.
+        """
+        # Initialize.
+        out = np.zeros(self.observation_space.shape, dtype=self.dtype)
+        # Put bus voltages in the first slots.
+        out[0:self.num_buses] = self.bus_pu_volt_arr
+        # Put gen states in the remaining slots.
+        out[self.num_buses:] = self.gen_status_arr
+        return out
+
+    def _get_observation_failed_pf(self) -> np.ndarray:
+        """If the power flow fails to solve, return an observation of 0
+        voltages, as well as the generator states.
+        """
+        # Initialize. No need to fill voltage slots since we'll put
+        # them all at 0 for failure.
+        out = np.zeros(self.observation_space.shape, dtype=self.dtype)
+        # Fill appropriate slots with generator states.
+        out[self.num_buses:] = self.gen_status_arr
+        return out
+
+    def _get_num_obs_and_space(self) -> Tuple[int, spaces.Box]:
+        """Number of observations is the number of buses plus the number
+        of generators. Observation space is a box for voltages and
+        generator states.
+        """
+        # Voltages should never get above 2 p.u, while gen states will be
+        # either 0 or 1.
+        n = self.num_buses + self.num_gens
+        low = np.zeros(n)
+        high = np.ones(n)
+        high[0:self.num_buses] = 2
+        return n, spaces.Box(low=low, high=high, dtype=self.dtype)
+
+
+class DiscreteVoltageControlBranchState14BusEnv(
+        DiscreteVoltageControlSimple14BusEnv):
+    """Identical to parent class, except branch states are included in
+    observations.
+    """
+    # Get line states during observation.
+    BRANCH_OBS_FIELDS = ['LineStatus']
+
+    def _get_branch_state_14(self) -> np.ndarray:
+        """Get line states as a vector, but hard-coded to only extract the
+        lines which are opened in GridMind for the 14 bus case.
+        """
+        # Hard-code select the lines. Indices correspond to lines
+        # 1-5, 2-3, 4-5, and 7-9. We can count on the array coming back in
+        # the same order every time.
+        return self.branch_status_arr[[1, 2, 6, 14]]
+
+    def _get_observation(self) -> np.ndarray:
+        # Initialize.
+        out = np.zeros(self.observation_space.shape, dtype=self.dtype)
+        # Fill first part with voltage.
+        out[0:self.num_buses] = self.bus_pu_volt_arr
+        # Fill remaining with line states.
+        out[self.num_buses:] = self._get_branch_state_14()
+        # Done.
+        return out
+
+    def _get_observation_failed_pf(self) -> np.ndarray:
+        # Initialize output.
+        out = np.zeros(self.observation_space.shape, dtype=self.dtype)
+        # Fill the branch state part, leaving the bus voltages at 0.
+        out[self.num_buses:] = self._get_branch_state_14()
+        return out
+
+    def _get_num_obs_and_space(self) -> Tuple[int, spaces.Box]:
+        """This function/method is specific to the 14 bus case, where
+        only four lines are being opened.
+        """
+        # Number of buses plus the lines that could be opened.
+        n = self.num_buses + len(self.LINES_TO_OPEN)
+        low = np.zeros(n)
+        high = np.ones(n)
+        # Voltages can go above one.
+        high[0:self.num_buses] = 2
+        return n, spaces.Box(low=low, high=high, dtype=self.dtype)
 
 
 class Error(Exception):
