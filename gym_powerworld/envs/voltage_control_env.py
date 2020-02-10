@@ -2616,6 +2616,44 @@ class DiscreteVoltageControlBranchState14BusEnv(
         return n, spaces.Box(low=low, high=high, dtype=self.dtype)
 
 
+class DiscreteVoltageControlBranchAndGenState14BusEnv(
+        DiscreteVoltageControlBranchState14BusEnv):
+    """Include both generator and branch states in observations."""
+    def _get_observation(self) -> np.ndarray:
+        # Initialize.
+        out = np.zeros(self.observation_space.shape, dtype=self.dtype)
+        # Fill first part with voltage.
+        out[0:self.num_buses] = self.bus_pu_volt_arr
+        # Fill the line and generator states.
+        return self._fill_gen_and_line_states(out)
+
+    def _get_observation_failed_pf(self) -> np.ndarray:
+        # Initialize output.
+        out = np.zeros(self.observation_space.shape, dtype=self.dtype)
+        # Fill line and generator portions.
+        return self._fill_gen_and_line_states(out)
+
+    def _fill_gen_and_line_states(self, arr_in):
+        end_idx = self.num_buses + len(self.LINES_TO_OPEN)
+        # Fill the branch state part, leaving the bus voltages at 0.
+        arr_in[self.num_buses:end_idx] = self._get_branch_state_14()
+        # Fill the generator state part.
+        arr_in[end_idx:] = self.gen_status_arr
+        return arr_in
+
+    def _get_num_obs_and_space(self) -> Tuple[int, spaces.Box]:
+        """This function/method is specific to the 14 bus case, where
+        only four lines are being opened.
+        """
+        # Number of buses plus the lines that could be opened.
+        n = self.num_buses + len(self.LINES_TO_OPEN) + self.num_gens
+        low = np.zeros(n)
+        high = np.ones(n)
+        # Voltages can go above one.
+        high[0:self.num_buses] = 2
+        return n, spaces.Box(low=low, high=high, dtype=self.dtype)
+
+
 class Error(Exception):
     """Base class for exceptions in this module."""
     pass

@@ -2346,6 +2346,148 @@ class DiscreteVoltageControlBranchState14BusEnvTestCase(unittest.TestCase):
 
 
 # noinspection DuplicatedCode
+class DiscreteVoltageControlBranchAndGenState14BusEnvTestCase(
+        unittest.TestCase):
+    """Quick testing of DiscreteVoltageControlBranchAndGenState14BusEnv.
+    """
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 1000
+        cls.max_load_factor = 1.2
+        cls.min_load_factor = 0.8
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.num_gen_voltage_bins = 5
+        cls.gen_voltage_range = (0.95, 1.05)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+        cls.log_buffer = 10
+        cls.csv_logfile = 'log.csv'
+
+        # Ensure we remove the logfile if it was created by other
+        # test cases.
+        try:
+            os.remove(cls.csv_logfile)
+        except FileNotFoundError:
+            pass
+
+        cls.env = \
+            voltage_control_env.DiscreteVoltageControlBranchAndGenState14BusEnv(
+                pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
+                max_load_factor=cls.max_load_factor,
+                min_load_factor=cls.min_load_factor,
+                min_load_pf=cls.min_load_pf,
+                lead_pf_probability=cls.lead_pf_probability,
+                load_on_probability=cls.load_on_probability,
+                num_gen_voltage_bins=cls.num_gen_voltage_bins,
+                gen_voltage_range=cls.gen_voltage_range,
+                seed=cls.seed,
+                log_level=logging.INFO,
+                dtype=cls.dtype,
+                log_buffer=cls.log_buffer,
+                csv_logfile=cls.csv_logfile
+            )
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.close()
+
+    def setUp(self) -> None:
+        self.env.scenario_idx = 0
+        self.env.reset()
+
+    def test_observation_shape(self):
+        # 14 buses, 4 "openable" lines, 5 generators.
+        self.assertEqual((14+4+5,), self.env.observation_space.shape)
+
+    def test_observation_bounds(self):
+        # All lower bounds should be 0.
+        np.testing.assert_array_equal(0, self.env.observation_space.low)
+        # Upper bounds corresponding to buses should be 2.
+        np.testing.assert_array_equal(2, self.env.observation_space.high[0:14])
+        # Remaining upper bounds correspond to line states and
+        # generator states should be at 1.
+        np.testing.assert_array_equal(1, self.env.observation_space.high[14:])
+
+    def test_num_obs(self):
+        # 14 buses, 4 lines to open, 5 generators.
+        self.assertEqual(14+4+5, self.env.num_obs)
+
+    def test_get_observation_and_get_observation_failed_pf(self):
+        # Get a copy of the line observation DataFrame.
+        branch_obs = self.env.branch_obs_data.copy(deep=True)
+        # Convert to multi-index to make selecting buses a bit
+        # simpler.
+        branch_obs.set_index(['BusNum', 'BusNum:1'], inplace=True)
+
+        # Close all lines.
+        branch_obs['LineStatus'] = 'Closed'
+
+        # Open the first and last eligible lines.
+        for idx in [0, len(self.env.LINES_TO_OPEN) - 1]:
+            l_t = self.env.LINES_TO_OPEN[idx]
+            branch_obs.loc[(l_t[0], l_t[1]), 'LineStatus'] = 'Open'
+
+        # Get a copy of the generator observation DataFrame.
+        gen_obs = self.env.gen_obs_data.copy(deep=True)
+
+        # Close all generators.
+        gen_obs['GenStatus'] = 'Closed'
+
+        # Open the first and last generators.
+        gen_obs.loc[0, 'GenStatus'] = 'Open'
+        gen_obs.loc[gen_obs.shape[0] - 1, 'GenStatus'] = 'Open'
+
+        # Patch the existing DataFrames, call _get_observation.
+        with patch.object(self.env, 'branch_obs_data',
+                          branch_obs.reset_index()):
+            with patch.object(self.env, 'gen_obs_data', gen_obs):
+                obs = self.env._get_observation()
+                obs_failed = self.env._get_observation_failed_pf()
+
+        # Ensure we get back the correct number of observations.
+        self.assertEqual(14+4+5, obs.shape[0])
+        self.assertEqual(14 + 4 + 5, obs_failed.shape[0])
+
+        # The first 14 values correspond to bus voltages.
+        np.testing.assert_array_less(0, obs[0:14])
+        np.testing.assert_array_equal(0, obs_failed[0:14])
+
+        # The remaining correspond to generator and line states.
+        line_arr = obs[14:18]
+        line_arr_failed = obs[14:18]
+        gen_arr = obs[18:]
+        gen_arr_failed = obs[18:]
+
+        # Gen states and line states should be the same for the normal
+        # and failed cases.
+        np.testing.assert_array_equal(line_arr, line_arr_failed)
+        np.testing.assert_array_equal(gen_arr, gen_arr_failed)
+
+        # Create array for expected line states.
+        line_expected = np.ones(len(self.env.LINES_TO_OPEN),
+                                dtype=self.env.dtype)
+        line_expected[0] = 0
+        line_expected[-1] = 0
+
+        # Create array for expected gen states.
+        gen_expected = np.ones(self.env.num_gens, dtype=self.env.dtype)
+        gen_expected[0] = 0
+        gen_expected[-1] = 0
+
+        # Test.
+        np.testing.assert_array_equal(line_expected, line_arr)
+        np.testing.assert_array_equal(gen_expected, gen_arr)
+
+
+# noinspection DuplicatedCode
 class TX2000BusShuntsTapsTestCase(unittest.TestCase):
     """Test case for shunts and taps in the Texas 2000 bus case.
     """
