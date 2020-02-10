@@ -775,6 +775,25 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         return self.bus_obs_data['BusPUVolt'].round(ROUND_DECIMALS).between(
             self.low_v, self.high_v, inclusive=True).all()
 
+    @property
+    def bus_pu_volt_arr(self) -> np.ndarray:
+        """Bus per unit voltages as a numpy array."""
+        return self.bus_obs_data['BusPUVolt'].to_numpy(dtype=self.dtype)
+
+    @property
+    def branch_state_arr(self) -> np.ndarray:
+        """Branch states (Open/Closed) as a numeric vector. Truthy
+        values  represent closed while falsey values represent open.
+        """
+        return (self.branch_obs_data['LineStatus'] == 'Closed').to_numpy(
+            dtype=self.dtype
+        )
+
+    @property
+    def gen_volt_set_arr(self) -> np.ndarray:
+        """Generator voltage setpoints as an array."""
+        return self.gen_obs_data['GenVoltSet'].to_numpy(dtype=self.dtype)
+
     ####################################################################
     # Public methods
     ####################################################################
@@ -1221,6 +1240,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self.bus_obs_data_prev = self.bus_obs_data
         self.gen_obs_data_prev = self.gen_obs_data
         self.load_obs_data_prev = self.load_obs_data
+        self.branch_obs_data_prev = self.branch_obs_data
 
         # Get new data.
         # Buses:
@@ -1235,6 +1255,11 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         if self.load_obs_fields is not None:
             self.load_obs_data = self.saw.GetParametersMultipleElement(
                 ObjectType='load', ParamList=self.load_obs_fields
+            )
+        # Branches:
+        if self.branch_obs_fields is not None:
+            self.branch_obs_data = self.saw.GetParametersMultipleElement(
+                ObjectType='branch', ParamList=self.branch_obs_fields
             )
 
         # That's it.
@@ -1325,10 +1350,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self.log_array[self.log_idx, 2] = self.current_reward
         # Data.
         self.log_array[self.log_idx, 3:] = \
-            np.concatenate(
-                (self.bus_obs_data['BusPUVolt'].to_numpy(),
-                 self.gen_obs_data['GenVoltSet'].to_numpy())
-            )
+            np.concatenate((self.bus_pu_volt_arr, self.gen_volt_set_arr))
 
         # Increment the log index.
         self.log_idx += 1
@@ -1856,9 +1878,9 @@ def _compute_reward_volt_change(self: DiscreteVoltageControlEnvBase) ->\
     # Give penalty for voltages that were in bounds, but moved out
     # of bounds. Penalty should be based on how far away from the
     # boundary (upper or lower) that they moved.
-    reward += ((self.bus_obs_data['BusPUVolt'][in_out_low] - LOW_V) / 0.01
+    reward += ((v_now[in_out_low] - LOW_V) / 0.01
                * self.rewards['v_delta']).sum()
-    reward += ((HIGH_V - self.bus_obs_data['BusPUVolt'][in_out_high])
+    reward += ((HIGH_V - v_now[in_out_high])
                / 0.01 * self.rewards['v_delta']).sum()
 
     # Give an extra penalty for moving buses out of bounds.
@@ -1922,15 +1944,9 @@ def _set_branches_for_scenario_open_line(self: DiscreteVoltageControlEnvBase):
     )
 
 
-def _get_observation_bus_pu_only(self: DiscreteVoltageControlEnvBase) \
-        -> np.ndarray:
-    """After consulting with a co-author on the GridMind paper
-    (Jiajun Duan) I've confirmed that for this voltage control problem
-    the only input states are bus per unit voltage magnitudes, contrary
-    to what is listed in the paper (line flows (P and Q), bus voltages
-    (angle and magnitude)).
-    """
-    return self.bus_obs_data['BusPUVolt'].to_numpy(dtype=self.dtype)
+def _get_observation_bus_pu_only(
+        self: DiscreteVoltageControlEnvBase) -> np.ndarray:
+    return self.bus_pu_volt_arr
 
 
 def _get_observation_bus_pu_and_gen_state(self: DiscreteVoltageControlEnvBase)\
@@ -2409,6 +2425,12 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
     _get_num_obs_and_space = _get_num_obs_space_v_only
     _compute_loading = _compute_loading_gridmind
     _compute_generation = _compute_generation_gridmind
+
+    # After consulting with a co-author on the GridMind paper
+    # (Jiajun Duan) I've confirmed that for this voltage control problem
+    # the only input states are bus per unit voltage magnitudes,
+    # contrary to what is listed in the paper (line flows (P and Q),
+    # bus voltages (angle and magnitude)).
     _get_observation = _get_observation_bus_pu_only
 
     def _set_gens_for_scenario(self):
