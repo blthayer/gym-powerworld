@@ -373,11 +373,11 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
             np.array([0.9, 0.925, 0.95, 0.975, 1.0, 1.025, 1.05, 1.075, 1.1]),
             self.env.gen_bins)
 
-    def test_action_array(self):
+    def test_gen_action_array(self):
         # Minus 1 because no-op action.
         self.assertEqual(self.env.action_space.n - 1,
-                         self.env.action_array.shape[0])
-        self.assertEqual(2, self.env.action_array.shape[1])
+                         self.env.gen_action_array.shape[0])
+        self.assertEqual(2, self.env.gen_action_array.shape[1])
 
         # Initialize array for comparison. Again, -1 due to no-op.
         a = np.zeros(shape=(self.env.action_space.n - 1, 2), dtype=int)
@@ -394,7 +394,7 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
 
         a[:, 1] = np.array(b)
 
-        np.testing.assert_array_equal(a, self.env.action_array)
+        np.testing.assert_array_equal(a, self.env.gen_action_array)
 
     def test_num_obs(self):
         """Ensure the number of observations matches the expected number
@@ -1376,33 +1376,33 @@ class GridMindControlEnv14BusInitTestCase(unittest.TestCase):
         finally:
             self.env.saw.LoadState()
 
-    def test_action_array(self):
+    def test_gen_action_array(self):
         """Ensure the action array is of the correct dimension."""
         # Check the shape.
-        self.assertEqual(self.env.action_array.shape[0],
+        self.assertEqual(self.env.gen_action_array.shape[0],
                          self.env.action_space.n)
-        self.assertEqual(self.env.action_array.shape[1], self.env.num_gens)
+        self.assertEqual(self.env.gen_action_array.shape[1], self.env.num_gens)
 
         # Spot check
-        np.testing.assert_array_equal(self.env.action_array[0, :],
+        np.testing.assert_array_equal(self.env.gen_action_array[0, :],
                                       np.array([self.gen_voltage_range[0]] * 5)
                                       )
 
-        np.testing.assert_array_equal(self.env.action_array[-1, :],
+        np.testing.assert_array_equal(self.env.gen_action_array[-1, :],
                                       np.array([self.gen_voltage_range[1]] * 5)
                                       )
 
         a = np.array([self.gen_voltage_range[0]] * 5)
         a[-1] = self.env.gen_bins[1]
-        np.testing.assert_array_equal(self.env.action_array[1, :], a)
+        np.testing.assert_array_equal(self.env.gen_action_array[1, :], a)
 
         b = np.array([self.gen_voltage_range[-1]] * 5)
         b[-1] = self.env.gen_bins[-2]
-        np.testing.assert_array_equal(self.env.action_array[-2, :], b)
+        np.testing.assert_array_equal(self.env.gen_action_array[-2, :], b)
 
         c = np.array([self.gen_voltage_range[0]] * 5)
         c[-2] = self.env.gen_bins[1]
-        np.testing.assert_array_equal(self.env.action_array[5], c)
+        np.testing.assert_array_equal(self.env.gen_action_array[5], c)
 
 
 # noinspection DuplicatedCode

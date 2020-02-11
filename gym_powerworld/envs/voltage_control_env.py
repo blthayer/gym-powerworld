@@ -2153,19 +2153,19 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         # memory use, the mapping can be computed on the fly rather
         # than stored in an array. For now, let's stick with a simple
         # approach.
-        self.action_array = np.zeros(shape=(self.action_space.n - 1, 2),
-                                     dtype=int)
+        self.gen_action_array = np.zeros(shape=(self.action_space.n - 1, 2),
+                                         dtype=int)
 
         # Repeat the generator indices in the first column of the
-        # action_array.
-        self.action_array[:, 0] = np.tile(self.gen_init_data.index.to_numpy(),
-                                          num_gen_voltage_bins)
+        # gen_action_array.
+        self.gen_action_array[:, 0] = \
+            np.tile(self.gen_init_data.index.to_numpy(), num_gen_voltage_bins)
 
         # Create indices into self.gen_bins in the second column.
         # It feels like this could be better vectorized, but this should
         # be close enough.
         for i in range(num_gen_voltage_bins):
-            self.action_array[
+            self.gen_action_array[
                 i * self.num_gens:(i + 1) * self.num_gens, 1] = i
 
         ################################################################
@@ -2235,8 +2235,8 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         action -= 1
 
         # Look up action and send to PowerWorld.
-        gen_idx = self.action_array[action, 0]
-        voltage = self.gen_bins[self.action_array[action, 1]]
+        gen_idx = self.gen_action_array[action, 0]
+        voltage = self.gen_bins[self.gen_action_array[action, 1]]
         self.saw.ChangeParametersSingleElement(
             ObjectType='gen', ParamList=self.gen_key_fields + ['GenVoltSet'],
             Values=(self.gen_init_data.loc[gen_idx,
@@ -2414,7 +2414,7 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         # TODO: It's silly to store this giant array in memory when you
         #   could compute the necessary permutation given an index on
         #   the fly.
-        self.action_array = \
+        self.gen_action_array = \
             np.array(list(itertools.product(
                 *[self.gen_bins for _ in range(self.num_gens)])
             ))
@@ -2489,7 +2489,8 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         """Send the generator set points into PowerWorld.
         """
         # Update the command df.
-        self.gen_com_data.loc[:, 'GenVoltSet'] = self.action_array[action, :]
+        self.gen_com_data.loc[:, 'GenVoltSet'] = \
+            self.gen_action_array[action, :]
         self.saw.change_parameters_multiple_element_df(
             ObjectType='gen',
             command_df=self.gen_com_data.loc[:, self.gen_key_fields
