@@ -381,9 +381,11 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
 
         # Initialize array for comparison. Again, -1 due to no-op.
         a = np.zeros(shape=(self.env.action_space.n - 1, 2), dtype=int)
-        # Put generator indices in column 0.
+        # Put generator bus numbers in column 0. No need to worry about
+        # multiple generators at the same bus for this case.
         a[:, 0] = np.array(
-            self.env.gen_init_data.index.tolist() * self.num_gen_voltage_bins)
+            self.env.gen_init_data['BusNum'].tolist()
+            * self.num_gen_voltage_bins)
 
         # Write a crappy, simple, loop to put the indices of the
         # generator voltage levels in.
@@ -2550,7 +2552,7 @@ class TX2000BusShuntsTapsGensTestCase(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.env.close()
 
-    def test_gens_at_same_bus_have_same_voltage_set_point(self):
+    def test_gens_at_same_bus_have_same_voltage_set_point_in_gen_v(self):
         # Extract boolean array indicating generators that regulate the
         # same bus.
         dup_arr = self.env.gen_dup_reg.to_numpy()
@@ -2562,6 +2564,43 @@ class TX2000BusShuntsTapsGensTestCase(unittest.TestCase):
         np.testing.assert_array_equal(
             self.env.gen_v[:, dup_arr],
             self.env.gen_v[:, dup_shifted]
+        )
+
+    def test_take_action_multiple_gens_same_bus(self):
+        """Ensure that commanding a voltage set point for generators
+        that share a bus works properly.
+        """
+        # Bus 4192 has a bunch of generators.
+        bus = 4192
+
+        # Pull the initial voltage. It should be at 1.02.
+        gen_volt_before = self.env.gen_init_data[
+            self.env.gen_init_data['BusNum'] == bus
+        ]['GenVoltSet']
+
+        np.testing.assert_allclose(gen_volt_before.to_numpy(), 1.02)
+
+        # Get the action which will put these generators at their max.
+        # Add 1 due to the no-op action.
+        action = np.argmax(
+            (self.env.gen_action_array[:, 0] == bus)
+            & (self.env.gen_action_array[:, 1]
+               == self.env.gen_bins.shape[0] - 1)) + 1
+
+        # Take the action.
+        self.env._take_action(action)
+
+        # Pull gens from PowerWorld.
+        gens = self.env.saw.GetParametersMultipleElement(
+            ObjectType='gen',
+            ParamList=['BusNum', 'GenID', 'GenVoltSet']
+        )
+
+        # All generators at our bus should have the maximum voltage
+        # set point.
+        np.testing.assert_allclose(
+            gens[gens['BusNum'] == bus]['GenVoltSet'].to_numpy(),
+            self.env.gen_bins[-1]
         )
 
     def test_shunt_init_data(self):

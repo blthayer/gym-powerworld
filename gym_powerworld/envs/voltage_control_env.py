@@ -599,6 +599,15 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # buses.
         self.gen_dup_reg = self.gen_init_data.duplicated('GenRegNum', 'first')
 
+        # Track the number of generator regulated buses.
+        self.num_gen_reg_buses = (~self.gen_dup_reg).sum()
+
+        # Create a multi-indexed version of the generators to ease
+        # sending voltage set point commands to generators at the same
+        # bus. "mi" for multi-index.
+        self.gen_init_data_mi = self.gen_init_data.set_index(
+            ['BusNum', 'GenID'])
+
         # Keep things simple by ensuring all generators simply regulate
         # their own bus.
         # TODO: This isn't necessary if the logic for ensuring voltage
@@ -2146,27 +2155,40 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         self.action_space = spaces.Discrete(self.num_gens
                                             * num_gen_voltage_bins + 1)
 
-        # The action array is a simple mapping array which corresponds
-        # 1:1 with the action_space. Each row represents an action,
-        # and within each row is an index into self.gen_data and into
-        # self.gen_bins, respectively. Note: if we need to really trim
-        # memory use, the mapping can be computed on the fly rather
-        # than stored in an array. For now, let's stick with a simple
-        # approach.
+        # Generator only action space. Don't include more than one
+        # generator per bus. +1 for no-op action.
+        self.action_space = spaces.Discrete(
+            self.num_gen_reg_buses * num_gen_voltage_bins + 1)
+
+        # self.action_space = spaces.Discrete(
+        #     self.num_gens * num_gen_voltage_bins + self.num_shunts * 2
+        #     + 1)
+
+        # The gen action array is a mapping where the first row entry
+        # is a generator bus number which can be used with
+        # self.gen_init_data_mi and the second entry in each row is an
+        # index into self.gen_bins. Note: if we need to really trim
+        # memory use, the mapping can be computed on the fly rather than
+        # stored in an array. For now, stick with a simple approach.
         self.gen_action_array = np.zeros(shape=(self.action_space.n - 1, 2),
                                          dtype=int)
 
-        # Repeat the generator indices in the first column of the
-        # gen_action_array.
+        # Repeat the unique generator bus numbers in the first column of
+        # the gen_action_array.
         self.gen_action_array[:, 0] = \
-            np.tile(self.gen_init_data.index.to_numpy(), num_gen_voltage_bins)
+            np.tile(
+                self.gen_init_data.loc[~self.gen_dup_reg, 'BusNum'].to_numpy(),
+                num_gen_voltage_bins)
 
         # Create indices into self.gen_bins in the second column.
         # It feels like this could be better vectorized, but this should
         # be close enough.
         for i in range(num_gen_voltage_bins):
-            self.gen_action_array[
-                i * self.num_gens:(i + 1) * self.num_gens, 1] = i
+            # Get starting and ending indices into the array.
+            s_idx = i * self.num_gen_reg_buses
+            e_idx = (i + 1) * self.num_gen_reg_buses
+            # Place index into the correct spot.
+            self.gen_action_array[s_idx:e_idx, 1] = i
 
         ################################################################
         # Misc.
@@ -2234,14 +2256,32 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         # Subtract one from the action so we can use it as an index.
         action -= 1
 
-        # Look up action and send to PowerWorld.
-        gen_idx = self.gen_action_array[action, 0]
+        # Extract generator bus number and voltage bin index.
+        gen_bus = self.gen_action_array[action, 0]
         voltage = self.gen_bins[self.gen_action_array[action, 1]]
-        self.saw.ChangeParametersSingleElement(
-            ObjectType='gen', ParamList=self.gen_key_fields + ['GenVoltSet'],
-            Values=(self.gen_init_data.loc[gen_idx,
-                    self.gen_key_fields].tolist() + [voltage])
-        )
+
+        # Get generators at this bus.
+        gens = self.gen_init_data_mi.loc[(gen_bus,), :]
+
+        # Send command in to PowerWorld.
+        if gens.shape[0] == 1:
+            # If there's just one generator at the bus, keep it simple.
+            self.saw.ChangeParametersSingleElement(
+                ObjectType='gen',
+                ParamList=['BusNum', 'GenID', 'GenVoltSet'],
+                # Since we pulled from gen_init_data_mi only using the
+                # first level of the multi-index (bus number), the
+                # remaining part of the index is the generator ID.
+                Values=[gen_bus, gens.index[0], voltage]
+            )
+        else:
+            # We have multiple generators that need commanded. Use
+            # ChangeParametersMultipleElement.
+            self.saw.ChangeParametersMultipleElement(
+                ObjectType='gen',
+                ParamList=['BusNum', 'GenID', 'GenVoltSet'],
+                ValueList=[[gen_bus, gen_id, voltage] for gen_id in gens.index]
+            )
 
     def _get_observation(self) -> np.ndarray:
         """Helper to return an observation. For the given simulation,
