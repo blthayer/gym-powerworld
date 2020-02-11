@@ -2488,8 +2488,9 @@ class DiscreteVoltageControlBranchAndGenState14BusEnvTestCase(
 
 
 # noinspection DuplicatedCode
-class TX2000BusShuntsTapsTestCase(unittest.TestCase):
-    """Test case for shunts and taps in the Texas 2000 bus case.
+class TX2000BusShuntsTapsGensTestCase(unittest.TestCase):
+    """Test case for shunts, taps, and generators in the Texas 2000 bus
+    case.
     """
 
     @classmethod
@@ -2548,6 +2549,20 @@ class TX2000BusShuntsTapsTestCase(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         cls.env.close()
+
+    def test_gens_at_same_bus_have_same_voltage_set_point(self):
+        # Extract boolean array indicating generators that regulate the
+        # same bus.
+        dup_arr = self.env.gen_dup_reg.to_numpy()
+        # Shift that boolean array backwards one slot so we can test.
+        dup_shifted = np.roll(dup_arr, -1)
+
+        # Ensure voltage set points are the same for generators on the
+        # same buses.
+        np.testing.assert_array_equal(
+            self.env.gen_v[:, dup_arr],
+            self.env.gen_v[:, dup_shifted]
+        )
 
     def test_shunt_init_data(self):
         """Ensure the right number of shunts have been picked up."""

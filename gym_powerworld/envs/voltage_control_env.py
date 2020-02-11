@@ -595,6 +595,22 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self.gen_mvar_produce_capacity = self.gen_init_data['GenMVRMax'].sum()
         self.gen_mvar_consume_capacity = self.gen_init_data['GenMVRMin'].sum()
 
+        # Get mask indicating which generators are regulating the same
+        # buses.
+        self.gen_dup_reg = self.gen_init_data.duplicated('GenRegNum', 'first')
+
+        # Keep things simple by ensuring all generators simply regulate
+        # their own bus.
+        # TODO: This isn't necessary if the logic for ensuring voltage
+        #   set points for generators at the same bus are the same is
+        #   improved.
+        if not (self.gen_init_data['BusNum']
+                == self.gen_init_data['GenRegNum']).all():
+            raise UserWarning(
+                'Not currently supporting generators that regulate buses '
+                'other than their own. This can be fixed without a horrendous '
+                'amount of effort.'
+            )
         ################################################################
         # Load fields and data
         ################################################################
@@ -609,7 +625,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         ################################################################
         # Shunt fields and data
         ################################################################
-        # Turn of automatic control for all shunts.
+        # Turn off automatic control for all shunts.
         if self.num_shunts > 0:
             # We'll tweak both the com_data and init_data as we're
             # essentially tweaking the base case.
@@ -1815,10 +1831,32 @@ def _compute_generation_gridmind(self: DiscreteVoltageControlEnvBase) -> None:
 def _compute_gen_v_set_points_draw(self: DiscreteVoltageControlEnvBase) -> \
         np.ndarray:
     """Compute generator voltage set points by drawing from the
-    environment's gen_bins attribute.
+    environment's gen_bins attribute. We also need to ensure that
+    generators that regulate the same bus are set to the same set point.
     """
-    return self.rng.choice(
+    # Start by simply randomly drawing for all generators.
+    df = pd.DataFrame(self.rng.choice(
         self.gen_bins, size=(self.num_scenarios, self.num_gens), replace=True)
+    )
+
+    if self.gen_dup_reg.any():
+        # Now, set gens which regulate the same bus as another to NaN,
+        # except for the first one. E.g., if generators at buses 3 and 4
+        # both regulate bus 5, the generator at bus 4 will have it's
+        # set point reset to NaN.
+        df.loc[:, self.gen_dup_reg.to_numpy()] = np.nan
+
+        # ASSUMPTION NOTE: Here, we assume generators are ALWAYS
+        # regulating their own bus, and not another. This could be
+        # improved.
+        # TODO: Allow for generators regulating other buses.
+        # Back fill to ensure generators which regulate the same
+        # bus have the same voltage set point. This counts on the fact
+        # that our gen_dup_reg Series marks duplicates as True except
+        # for the first occurrence.
+        df.fillna(method='pad', inplace=True, limit=None, axis='columns')
+
+    return df.to_numpy()
 
 
 def _compute_reward_volt_change(self: DiscreteVoltageControlEnvBase) ->\
@@ -1986,7 +2024,8 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     """
     # Gen fields. See base class for comments.
     GEN_INIT_FIELDS = ['BusCat', 'GenMW', 'GenMVR', 'GenVoltSet', 'GenMWMax',
-                       'GenMWMin', 'GenMVRMax', 'GenMVRMin', 'GenStatus']
+                       'GenMWMin', 'GenMVRMax', 'GenMVRMin', 'GenStatus',
+                       'GenRegNum']
     GEN_OBS_FIELDS = ['GenMW', 'GenMWMax', 'GenMVA', 'GenMVRPercent',
                       'GenStatus', 'GenVoltSet']
     GEN_RESET_FIELDS = ['GenMW', 'GenStatus', 'GenVoltSet']
@@ -2317,7 +2356,8 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
     """
     # Gen fields. See base class for comments.
     GEN_INIT_FIELDS = ['GenMW', 'GenMVR', 'GenVoltSet', 'GenMWMax',
-                       'GenMWMin', 'GenMVRMax', 'GenMVRMin', 'GenStatus']
+                       'GenMWMin', 'GenMVRMax', 'GenMVRMin', 'GenStatus',
+                       'GenRegNum']
     GEN_OBS_FIELDS = ['GenMW', 'GenMWMax', 'GenMVA', 'GenMVRPercent',
                       'GenStatus', 'GenVoltSet']
     GEN_RESET_FIELDS = ['GenMW', 'GenStatus']
