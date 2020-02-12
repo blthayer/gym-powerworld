@@ -41,3 +41,9 @@ register(
     entry_point=
         'gym_powerworld.envs:DiscreteVoltageControlBranchAndGenState14BusEnv'
 )
+
+register(
+    id='powerworld-discrete-env-gen-shunt-no-contingencies-v0',
+    entry_point=
+        'gym_powerworld.envs:DiscreteVoltageControlGenAndShuntNoContingenciesEnv'
+)

@@ -58,6 +58,16 @@ ROUND_DECIMALS = 6
 # environments.
 LINES_TO_OPEN_14 = ((1, 5, '1'), (2, 3, '1'), (4, 5, '1'), (7, 9, '1'))
 
+# Map for open/closed states.
+STATE_MAP = {
+    1: 'Closed',
+    0: 'Open',
+    True: 'Closed',
+    False: 'Open',
+    1.0: 'Closed',
+    0.0: 'Open'
+}
+
 
 def _set_gens_for_scenario_gen_mw_and_v_set_point(self) -> None:
     """Set generator Open/Closed states and set Gen MW setpoints based
@@ -830,6 +840,14 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         correspond to Open.
         """
         return (self.branch_obs_data['LineStatus'] == 'Closed').to_numpy(
+            dtype=self.dtype)
+
+    @property
+    def shunt_status_arr(self) -> np.ndarray:
+        """Get shunt states (Open/Closed) as a numeric vector. Truthy
+        values correspond to Closed, falsey values correspond to Open.
+        """
+        return (self.shunt_obs_data['SSStatus'] == 'Closed').to_numpy(
             dtype=self.dtype)
 
     ####################################################################
@@ -1997,7 +2015,7 @@ def _get_observation_bus_pu_only(
     return self.bus_pu_volt_arr
 
 
-def _get_num_obs_space_v_only(
+def _get_num_obs_and_space_v_only(
         self: DiscreteVoltageControlEnvBase) -> Tuple[int, spaces.Box]:
     """Number of observations is simply the number of buses,
     observation space is a box for voltages.
@@ -2137,20 +2155,20 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         ################################################################
         # Action space definition
         ################################################################
-        # TODO: Add shunts and regulators.
-        # Create action space by discretizing generator set points. Also
-        # include a single no-op action (hence the + 1).
-        self.action_space = spaces.Discrete(self.num_gens
-                                            * num_gen_voltage_bins + 1)
+        # TODO: Add regulators.
+        # TODO: support more regulator configurations.
 
-        # Generator only action space. Don't include more than one
-        # generator per bus. +1 for no-op action.
+        # Start by getting a listing of regulators that are in parallel.
+        if self.num_ltc > 0:
+            self.parallel_ltc = self.ltc_init_data.duplicated(
+                ['BusNum', 'BusNum:1'])
+
+        # Generator and shunt action space. Don't include more than one
+        # generator per bus. Shunts are toggle, so only need one action
+        # per shunt. +1 for no-op action.
         self.action_space = spaces.Discrete(
-            self.num_gen_reg_buses * num_gen_voltage_bins + 1)
-
-        # self.action_space = spaces.Discrete(
-        #     self.num_gens * num_gen_voltage_bins + self.num_shunts * 2
-        #     + 1)
+            self.num_gen_reg_buses * num_gen_voltage_bins
+            + self.num_shunts + 1)
 
         # The gen action array is a mapping where the first row entry
         # is a generator bus number which can be used with
@@ -2158,8 +2176,9 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         # index into self.gen_bins. Note: if we need to really trim
         # memory use, the mapping can be computed on the fly rather than
         # stored in an array. For now, stick with a simple approach.
-        self.gen_action_array = np.zeros(shape=(self.action_space.n - 1, 2),
-                                         dtype=int)
+        self.gen_action_array = np.zeros(
+            shape=(self.num_gen_reg_buses * num_gen_voltage_bins, 2),
+            dtype=int)
 
         # Repeat the unique generator bus numbers in the first column of
         # the gen_action_array.
@@ -2234,18 +2253,43 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
             dtype=self.dtype)
 
     def _take_action(self, action):
-        """Helper to make the appropriate updates in PowerWorld for a
-        given action.
-        """
+        """Routing method which adjusts the action and sends it to the
+         correct helper method (_take_action_gens, _take_action_shunts,
+         or _take_action_ltcs).
+         """
         # The 0th action is a "do nothing" action.
         if action == self.no_op_action:
             return
 
-        # Subtract one from the action so we can use it as an index.
+        # Subtract one from the action to keep things simple.
         action -= 1
 
+        if action < self.gen_action_array.shape[0]:
+            # Pass the action into the gens method.
+            self._take_action_gens(action)
+            return
+
+        # Adjust the action for shunts.
+        action -= self.gen_action_array.shape[0]
+
+        if action < self.num_shunts:
+            # Pass the action into the shunts method.
+            self._take_action_shunts(action)
+            return
+
+        # Adjust the action for LTCs.
+        action -= self.num_shunts
+        self._take_action_ltcs(action)
+        return
+
+    def _take_action_gens(self: DiscreteVoltageControlEnvBase, action):
+        """Helper to make the appropriate updates in PowerWorld for
+        generator voltage set point updates.
+        """
         # Extract generator bus number and voltage bin index.
+        # noinspection PyUnresolvedReferences
         gen_bus = self.gen_action_array[action, 0]
+        # noinspection PyUnresolvedReferences
         voltage = self.gen_bins[self.gen_action_array[action, 1]]
 
         # Get generators at this bus.
@@ -2268,8 +2312,33 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
             self.saw.ChangeParametersMultipleElement(
                 ObjectType='gen',
                 ParamList=['BusNum', 'GenID', 'GenVoltSet'],
-                ValueList=[[gen_bus, gen_id, voltage] for gen_id in gens.index]
-            )
+                ValueList=[[gen_bus, gen_id, voltage] for gen_id in
+                           gens.index]
+                )
+
+    def _take_action_shunts(self, action):
+        """Helper to make the appropriate update in PowerWorld for
+        toggling switched shunts.
+        """
+        # Grab the current state for this shunt.
+        s = self.shunt_status_arr[action]
+
+        # Look up the new state.
+        new = STATE_MAP[not s]
+
+        # Grab the key fields for the shunt in question.
+        kf = self.shunt_init_data.iloc[action][self.shunt_key_fields].tolist()
+
+        # Send in the command.
+        self.saw.ChangeParametersSingleElement(
+            ObjectType='shunt',
+            ParamList=self.shunt_key_fields + ['SSStatus'],
+            Values=kf + [new]
+        )
+
+    # noinspection PyMethodMayBeStatic
+    def _take_action_ltcs(self, action):
+        return NotImplementedError()
 
     def _get_observation(self) -> np.ndarray:
         """Helper to return an observation. For the given simulation,
@@ -2461,7 +2530,7 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
     def action_cap(self) -> int:
         return self._action_cap
 
-    _get_num_obs_and_space = _get_num_obs_space_v_only
+    _get_num_obs_and_space = _get_num_obs_and_space_v_only
     _compute_loading = _compute_loading_gridmind
     _compute_generation = _compute_generation_gridmind
 
@@ -2569,6 +2638,50 @@ class GridMindHardEnv(GridMindContingenciesEnv):
     _set_gens_for_scenario = _set_gens_for_scenario_gen_mw_and_v_set_point
 
 
+class DiscreteVoltageControlGenAndShuntNoContingenciesEnv(
+        DiscreteVoltageControlEnv):
+    """
+    Actions: Generator set point, toggle shunt
+    Observations: Bus voltage, generator state, shunt state
+    Reward: Voltage movement only
+    """
+    # No contingencies.
+    LINES_TO_OPEN = None
+
+    # Voltage movement only reward.
+    _compute_reward = _compute_reward_volt_change
+
+    def _get_observation(self) -> np.ndarray:
+        """Concatenate bus voltages, generator states, and shunt states.
+        """
+        return np.concatenate(
+            (self.bus_pu_volt_arr, self.gen_status_arr, self.shunt_status_arr)
+        )
+
+    def _get_observation_failed_pf(self):
+        """Concatenate bus voltages (0 due to failed power flow),
+        generator states, and shunt states.
+        """
+        return np.concatenate(
+            (_get_observation_failed_pf_volt_only(self),
+             self.gen_status_arr, self.shunt_status_arr)
+        )
+
+    def _get_num_obs_and_space(self) -> Tuple[int, spaces.Box]:
+        """Number of observations is number of buses plus number of shunts,
+        observation space is box for voltages and shunt states.
+        """
+        # Observations consist of bus per unit voltage, generator
+        # states and shunt states.
+        n = self.num_buses + self.num_gens + self.num_shunts
+        # Low is 0 for all quantities.
+        low = np.zeros(n, dtype=self.dtype)
+        # High will be 2 for bus voltages, 1 for everything else.
+        high = np.ones(n, dtype=self.dtype)
+        high[0:self.num_buses] = 2
+        return n, spaces.Box(low=low, high=high, dtype=self.dtype)
+
+
 class DiscreteVoltageControlSimpleEnv(DiscreteVoltageControlEnv):
     """Simplified version of the DiscreteVoltageControlEnv will use
     only bus magnitudes for observations, and will only consider voltage
@@ -2577,7 +2690,7 @@ class DiscreteVoltageControlSimpleEnv(DiscreteVoltageControlEnv):
     # Use only bus per unit voltages in the observations.
     _get_observation = _get_observation_bus_pu_only
     _get_observation_failed_pf = _get_observation_failed_pf_volt_only
-    _get_num_obs_and_space = _get_num_obs_space_v_only
+    _get_num_obs_and_space = _get_num_obs_and_space_v_only
 
     # Use only bus voltage movement in the rewards.
     _compute_reward = _compute_reward_volt_change

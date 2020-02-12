@@ -31,6 +31,9 @@ PWB_14_CONDENSERS = os.path.join(DIR_14, 'IEEE 14 bus condensers.pwb')
 # Case with min and max MW limits on all 5 generators.
 PWB_14_LIMITS = os.path.join(DIR_14, 'IEEE 14 bus limits.pwb')
 
+# IL 200
+PWB_200 = os.path.join(CASE_DIR, 'il_200', 'ACTIVSg200.pwb')
+
 # TX 2000
 PWB_2000 = os.path.join(CASE_DIR, 'tx_2000',
                         'ACTIVSg2000_AUG-09-2018_Ride_mod.PWB')
@@ -2490,6 +2493,185 @@ class DiscreteVoltageControlBranchAndGenState14BusEnvTestCase(
 
 
 # noinspection DuplicatedCode
+class IL200BusShuntsTestCase(unittest.TestCase):
+    """Test case for shunts with the 200 bus case and the
+    DiscreteVoltageControlGenAndShuntNoContingenciesEnv.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 1000
+        cls.max_load_factor = 1.4
+        cls.min_load_factor = 0.6
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.9
+        cls.shunt_closed_probability = 0.5
+        cls.num_gen_voltage_bins = 5
+        cls.gen_voltage_range = (0.95, 1.05)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+        cls.log_buffer = 10
+        cls.csv_logfile = 'log.csv'
+
+        cls.env = \
+            voltage_control_env.DiscreteVoltageControlGenAndShuntNoContingenciesEnv(
+                pwb_path=PWB_200, num_scenarios=cls.num_scenarios,
+                max_load_factor=cls.max_load_factor,
+                min_load_factor=cls.min_load_factor,
+                min_load_pf=cls.min_load_pf,
+                lead_pf_probability=cls.lead_pf_probability,
+                load_on_probability=cls.load_on_probability,
+                shunt_closed_probability=cls.shunt_closed_probability,
+                num_gen_voltage_bins=cls.num_gen_voltage_bins,
+                gen_voltage_range=cls.gen_voltage_range,
+                seed=cls.seed,
+                log_level=logging.INFO,
+                dtype=cls.dtype,
+                log_buffer=cls.log_buffer,
+                csv_logfile=cls.csv_logfile
+            )
+
+    def setUp(self) -> None:
+        self.env.scenario_idx = 0
+        self.env.reset()
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.close()
+
+    def _shunt_action_helper(self, shunt_idx, start_state, finish_state):
+        """The last action should toggle the last shunt. Ensure that
+        shunt is open first. shunt_idx should be negative only.
+        """
+        # Grab the last shunt.
+        last_shunt = self.env.shunt_init_data.iloc[shunt_idx].copy()
+        # Open it.
+        last_shunt['SSStatus'] = start_state
+        self.env.saw.ChangeParametersSingleElement(
+            ObjectType='shunt',
+            ParamList=last_shunt.index.tolist(),
+            Values=last_shunt.tolist()
+        )
+        # Update observations.
+        self.env._rotate_and_get_observation_frames()
+
+        # Helper to pull this shunt.
+        def get_shunt():
+            s = self.env.saw.GetParametersSingleElement(
+                ObjectType='shunt',
+                ParamList=['BusNum', 'ShuntID', 'SSStatus'],
+                Values=[last_shunt['BusNum'], last_shunt['ShuntID'], 0])
+            return s
+
+        # Confirm shunt changed state in PowerWorld.
+        shunt_out = get_shunt()
+        self.assertEqual(start_state, shunt_out['SSStatus'])
+
+        # Now, take the last action, which should toggle this shunt.
+        self.env._take_action(self.env.action_space.n + shunt_idx)
+
+        # Confirm it's closed now.
+        shunt_out = get_shunt()
+        self.assertEqual(finish_state, shunt_out['SSStatus'])
+
+    def test_take_action_last_shunt_open_to_closed(self):
+        """Toggle the last shunt from open to closed."""
+        self._shunt_action_helper(
+            shunt_idx=-1, start_state='Open', finish_state='Closed')
+
+    def test_take_action_first_shunt_closed_to_open(self):
+        """Toggle the first shunt from closed to open."""
+        # Hard-code the fact that there are 4 shunts in this case.
+        self._shunt_action_helper(
+            shunt_idx=-4, start_state='Closed', finish_state='Open'
+        )
+
+    def test_observation_space(self):
+        """Ensure the observation space is the correct size via
+        hard-coding.
+        """
+        # 200 buses, 49 generators, 4 shunts.
+        n = 200 + 49 + 4
+
+        self.assertEqual(
+            (n,), self.env.observation_space.shape
+        )
+
+        # Lower bound should be 0.
+        np.testing.assert_array_equal(
+            np.zeros(n, dtype=self.env.dtype), self.env.observation_space.low
+        )
+
+        # Voltage cap at 2.
+        np.testing.assert_array_equal(
+            np.ones(200, dtype=self.dtype) + 1,
+            self.env.observation_space.high[0:200])
+
+        # All else at 1 (gen and shunt states)
+        np.testing.assert_array_equal(
+            np.ones(49+4, dtype=self.dtype),
+            self.env.observation_space.high[200:]
+        )
+
+    def test_action_1_puts_gen_at_min(self):
+        """Ensure action 1 puts the first generator at the lowest
+        set point.
+        """
+        # Get the set point.
+        gen_data = self.env.gen_obs_data.iloc[0]
+        initial_v = gen_data['GenVoltSet']
+
+        # Ensure we dont' start at the minimum.
+        self.assertNotAlmostEqual(initial_v, self.gen_voltage_range[0])
+
+        # Take action 1 (0 is no-op).
+        self.env._take_action(1)
+
+        # Pull voltage for this generator.
+        gen = self.env.saw.GetParametersSingleElement(
+            ObjectType='gen',
+            ParamList=self.env.gen_key_fields + ['GenVoltSet'],
+            Values=gen_data[self.env.gen_key_fields].tolist() + [0]
+        )
+
+        # Ensure it's voltage set point is at the minimum.
+        self.assertAlmostEqual(self.gen_voltage_range[0], gen['GenVoltSet'])
+
+    def test_last_gen_action_puts_gen_at_max(self):
+        """Ensure the last possible gen action puts the last generator
+        at the highest set point.
+        """
+        # Get the starting set point.
+        gen_data = self.env.gen_obs_data.iloc[-1]
+        initial_v = gen_data['GenVoltSet']
+
+        # Ensure we don't start at the maximum.
+        self.assertNotAlmostEqual(initial_v, self.gen_voltage_range[1])
+
+        # Take the last generator action. No need for -1 because action
+        # 0 is no-op.
+        self.env._take_action(self.env.num_gens * self.num_gen_voltage_bins)
+
+        # Pull voltage for this generator.
+        gen = self.env.saw.GetParametersSingleElement(
+            ObjectType='gen',
+            ParamList=self.env.gen_key_fields + ['GenVoltSet'],
+            Values=gen_data[self.env.gen_key_fields].tolist() + [0]
+        )
+
+        # Ensure it's voltage set point is at the maximum.
+        self.assertAlmostEqual(self.gen_voltage_range[1], gen['GenVoltSet'],
+                               6)
+
+
+# noinspection DuplicatedCode
 class TX2000BusShuntsTapsGensTestCase(unittest.TestCase):
     """Test case for shunts, taps, and generators in the Texas 2000 bus
     case.
@@ -2798,6 +2980,14 @@ class TX2000BusShuntsTapsGensTestCase(unittest.TestCase):
         correctly.
         """
         self.assertTrue(False)
+
+    # def test_solve(self):
+    #     while self.env.scenario_idx < self.env.num_scenarios:
+    #         self.env.reset()
+    #
+    #     ratio = self.env.reset_successes / self.env.num_scenarios
+    #     self.assertGreaterEqual(ratio, 0.9)
+    #     print(f'Success ratio: {ratio:.3f}')
 
 #
 # # noinspection DuplicatedCode
