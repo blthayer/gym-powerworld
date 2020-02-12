@@ -1274,31 +1274,19 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         """Simple helper to get new observation DataFrames, and rotate
         the previous frames into the correct attributes.
         """
-        # Rotate.
-        self.bus_obs_data_prev = self.bus_obs_data
-        self.gen_obs_data_prev = self.gen_obs_data
-        self.load_obs_data_prev = self.load_obs_data
-        self.branch_obs_data_prev = self.branch_obs_data
+        # Loop over the various object types.
+        for obj in ['bus', 'gen', 'load', 'branch', 'shunt']:
+            # Rotate <obj>_obs_data into <obj>_obs_data_prev.
+            setattr(self, obj + '_obs_data_prev',
+                    getattr(self, obj + '_obs_data'))
 
-        # Get new data.
-        # Buses:
-        if self.bus_obs_fields is not None:
-            self.bus_obs_data = self.saw.GetParametersMultipleElement(
-                ObjectType='bus', ParamList=self.bus_obs_fields)
-        # Generators:
-        if self.gen_obs_fields is not None:
-            self.gen_obs_data = self.saw.GetParametersMultipleElement(
-                ObjectType='gen', ParamList=self.gen_obs_fields)
-        # Loads:
-        if self.load_obs_fields is not None:
-            self.load_obs_data = self.saw.GetParametersMultipleElement(
-                ObjectType='load', ParamList=self.load_obs_fields
-            )
-        # Branches:
-        if self.branch_obs_fields is not None:
-            self.branch_obs_data = self.saw.GetParametersMultipleElement(
-                ObjectType='branch', ParamList=self.branch_obs_fields
-            )
+            # Get new data if applicable.
+            fields = getattr(self, obj + '_obs_fields')
+            if fields is not None:
+                setattr(
+                    self, obj + '_obs_data',
+                    self.saw.GetParametersMultipleElement(
+                        ObjectType=obj, ParamList=fields))
 
         # That's it.
         return None
