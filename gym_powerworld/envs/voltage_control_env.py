@@ -2538,6 +2538,35 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
             ObjectType='shunt', command_df=shunts)
 
 
+class DiscreteVoltageControlEnvVoltBounds(DiscreteVoltageControlEnv):
+    """Modified version of DiscreteVoltageControlEnv which rejects
+    scenarios with voltages outside of [MIN_V, MAX_V].
+    """
+    def _solve_and_observe(self):
+        """Helper to solve the power flow and get an observation.
+        The case will be considered to "fail" if voltages are outside
+        the [MIN_V, MAX_V] range.
+
+        :raises PowerWorldError: If PowerWorld fails to solve the power
+            flow or voltages are outside of [MIN_V, MAX_V].
+        """
+        # Start by solving the power flow. This will raise a
+        # PowerWorldError if it fails to solve.
+        self.saw.SolvePowerFlow()
+
+        # Get new observations, rotate old ones.
+        self._rotate_and_get_observation_frames()
+
+        if ((self.bus_pu_volt_arr.min() < self.dtype(MIN_V))
+                or (self.bus_pu_volt_arr.max() > self.dtype(MAX_V))):
+            raise PowerWorldError(
+                'Scenario rejected as there was at least one bus voltage '
+                f'less than {MIN_V:.2f} or greater than {MAX_V:.2f}')
+
+        # Get and return a properly arranged observation.
+        return self._get_observation()
+
+
 class GridMindEnv(DiscreteVoltageControlEnvBase):
     """Environment for attempting to replicate the work done by the
     State Grid Corporation of China, described in the following paper:

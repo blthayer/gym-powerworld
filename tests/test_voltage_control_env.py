@@ -3212,6 +3212,90 @@ class ScaleVoltagesTestCase(unittest.TestCase):
                              MAX_V_SCALED])
         np.testing.assert_allclose(expected, _scale_voltages(a))
 
+
+class DiscreteVoltageControlEnvVoltBoundsTestCase(unittest.TestCase):
+    """Test the DiscreteVoltageControlEnvVoltBounds class."""
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 10
+        cls.max_load_factor = 2
+        cls.min_load_factor = 0.5
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.num_gen_voltage_bins = 9
+        cls.gen_voltage_range = (0.9, 1.1)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+
+        cls.env = voltage_control_env.DiscreteVoltageControlEnvVoltBounds(
+            pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
+            max_load_factor=cls.max_load_factor,
+            min_load_factor=cls.min_load_factor,
+            min_load_pf=cls.min_load_pf,
+            lead_pf_probability=cls.lead_pf_probability,
+            load_on_probability=cls.load_on_probability,
+            num_gen_voltage_bins=cls.num_gen_voltage_bins,
+            gen_voltage_range=cls.gen_voltage_range,
+            seed=cls.seed,
+            log_level=logging.INFO,
+            dtype=cls.dtype
+        )
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.close()
+
+    def patch_helper(self, df, exc=True):
+        with patch.object(self.env.saw, 'SolvePowerFlow') as p:
+            with patch.object(self.env, 'bus_obs_data', new=df):
+                with patch.object(self.env,
+                                  '_rotate_and_get_observation_frames'):
+                    with patch.object(self.env, '_get_observation'):
+                        if exc:
+                            with self.assertRaisesRegex(PowerWorldError,
+                                                        'Scenario rejected'):
+                                self.env._solve_and_observe()
+                        else:
+                            self.env._solve_and_observe()
+
+    def test_solve_and_observe_low(self):
+        """Ensure _solve_and_observe throws a PowerWorld error for
+        voltages below the threshold.
+        """
+        # Patch the bus_obs_data DataFrame.
+        df = pd.DataFrame({'BusPUVolt': np.ones(self.env.num_buses)})
+        df.iloc[3]['BusPUVolt'] = MIN_V - 0.01
+
+        self.patch_helper(df, True)
+
+    def test_solve_and_observe_high(self):
+        """Ensure _solve_and_observe throws a PowerWorld error for
+        voltages below the threshold.
+        """
+        # Patch the bus_obs_data DataFrame.
+        df = pd.DataFrame({'BusPUVolt': np.ones(self.env.num_buses)})
+        df.iloc[7]['BusPUVolt'] = MAX_V + 0.01
+
+        self.patch_helper(df, True)
+
+    def test_solve_and_observe_in_bounds(self):
+        """Ensure _solve_and_observe throws a PowerWorld error for
+        voltages below the threshold.
+        """
+        # Patch the bus_obs_data DataFrame.
+        df = pd.DataFrame({'BusPUVolt': np.ones(self.env.num_buses)})
+        df.iloc[11]['BusPUVolt'] = MAX_V
+        df.iloc[1]['BusPUVolt'] = MIN_V
+
+        self.patch_helper(df, False)
+
 #
 # # noinspection DuplicatedCode
 # class GridMindHardSolveTestCase(unittest.TestCase):
