@@ -722,6 +722,11 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self.gen_v = self._compute_gen_v_set_points()
 
         ################################################################
+        # Scenario/episode initialization: branches
+        ################################################################
+        self.branches_to_open = self._compute_branches()
+
+        ################################################################
         # Observation space definition
         ################################################################
         self.num_obs, self.observation_space = self._get_num_obs_and_space()
@@ -1324,14 +1329,6 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         loads.loc[:, 'LoadSMVR'] = self.loads_mvar[self.scenario_idx, :]
         self.saw.change_parameters_multiple_element_df('load', loads)
 
-    def _set_branches_for_scenario(self):
-        """Helper to set up lines and/or taps. Some subclasses will do
-        nothing. In the future, this should be made to more closely
-        follow the pattern of _set_gens_for_scenario and
-        _set_loads_for_scenario.
-        """
-        pass
-
     def _set_shunts_for_scenario(self):
         """Helper to set up shunts. Some subclasses will do nothing."""
         pass
@@ -1443,6 +1440,14 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         """
 
     @abstractmethod
+    def _compute_branches(self):
+        """Subclasses should implement this method to create an array
+        of data related to branch states. In most cases, this will
+        likely just be an array of shape (num_scenarios,) with a branch
+        index in each spot.
+        """
+
+    @abstractmethod
     def _take_action(self, action):
         """Subclasses should implement a _take_action method which takes
         a given action, looks up what it does, and takes the action in
@@ -1492,6 +1497,13 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     @abstractmethod
     def _get_num_obs_and_space(self) -> Tuple[int, spaces.Space]:
         """Return the number of observations, and an observation space.
+        """
+
+    @abstractmethod
+    def _set_branches_for_scenario(self):
+        """Helper to set up lines and/or taps using
+        self.branches_to_open, which is created by calling
+        self._compute_branches.
         """
 
 
@@ -1874,6 +1886,19 @@ def _compute_gen_v_set_points_draw(self: DiscreteVoltageControlEnvBase) -> \
     return df.to_numpy()
 
 
+def _compute_branches_from_lines_to_open(self):
+    """Draw a random line index from LINES_TO_OPEN for each
+    scenario.
+    """
+    if (self.LINES_TO_OPEN is None) or (len(self.LINES_TO_OPEN) == 0):
+        # Nothing to do.
+        return None
+
+    # Simply draw an index for each line.
+    return self.rng.integers(low=0, high=len(self.LINES_TO_OPEN),
+                             size=self.num_scenarios)
+
+
 def _compute_reward_volt_change(self: DiscreteVoltageControlEnvBase) ->\
         float:
     """Compute reward based on voltage movement.
@@ -1983,24 +2008,16 @@ def _compute_reward_volt_and_var_change(self: DiscreteVoltageControlEnvBase) \
     return reward
 
 
-def _set_branches_for_scenario_open_line(self: DiscreteVoltageControlEnvBase):
-    """Open a random line from the LINES_TO_OPEN attribute, which is
-    a list containing line data.
+def _set_branches_for_scenario_from_lines_to_open(self: DiscreteVoltageControlEnvBase):
+    """Open a line from LINES_TO_OPEN.
     """
-    # TODO: This method is not consistent with others that set things up
-    #   for a given scenario. Really, in initialization, a random choice
-    #   for each scenario should be drawn, and then this method simply
-    #   grabs the appropriate one and sends the command in to
-    #   PowerWorld.
     # Do nothing if we have no lines to open.
-    if (self.LINES_TO_OPEN is None) or (len(self.LINES_TO_OPEN) == 0):
+    if self.branches_to_open is None:
         # Do nothing.
         return
 
-    # Draw a line. Not using "choice" to pull an element since it
-    # changes data types and casts to a numpy array, when we just
-    # want a list.
-    line = self.LINES_TO_OPEN[self.rng.choice(len(self.LINES_TO_OPEN))]
+    # Extract the line from LINES_TO_OPEN.
+    line = self.LINES_TO_OPEN[self.branches_to_open[self.scenario_idx]]
 
     # Open the line.
     self.saw.ChangeParametersSingleElement(
@@ -2218,6 +2235,34 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     _compute_generation = _compute_generation_and_dispatch
     _compute_reward = _compute_reward_volt_and_var_change
     _compute_gen_v_set_points = _compute_gen_v_set_points_draw
+
+    def _compute_branches(self):
+        """Draw from all available branches."""
+        if self.branch_init_data is None:
+            # Nothing to do.
+            return None
+
+        # Simply draw a line index for each scenario.
+        return self.rng.integers(low=0, high=self.branch_init_data.shape[0],
+                                 size=self.num_scenarios)
+
+    def _set_branches_for_scenario(self):
+        """Open the line with the appropriate index."""
+        # Do nothing if we have no lines to open.
+        if self.branches_to_open is None:
+            # Do nothing.
+            return
+
+        # Extract the line the initialization data.
+        line = self.branch_init_data.iloc[
+            self.branches_to_open[self.scenario_idx]][self.branch_key_fields]
+
+        # Open the line.
+        self.saw.ChangeParametersSingleElement(
+            ObjectType='branch',
+            ParamList=self.branch_key_fields + ['LineStatus'],
+            Values=line.tolist() + ['Open']
+        )
 
     def _get_num_obs_and_space(self) -> Tuple[int, spaces.Space]:
         ################################################################
@@ -2533,6 +2578,8 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
     _get_num_obs_and_space = _get_num_obs_and_space_v_only
     _compute_loading = _compute_loading_gridmind
     _compute_generation = _compute_generation_gridmind
+    _compute_branches = _compute_branches_from_lines_to_open
+    _set_branches_for_scenario = _set_branches_for_scenario_from_lines_to_open
 
     # After consulting with a co-author on the GridMind paper
     # (Jiajun Duan) I've confirmed that for this voltage control problem
@@ -2623,9 +2670,6 @@ class GridMindContingenciesEnv(GridMindEnv):
     # In the paper, the allowed lines are 1-5, 2-3, 4-5, and 7-9.
     LINES_TO_OPEN = LINES_TO_OPEN_14
 
-    # For each scenario, open a random line.
-    _set_branches_for_scenario = _set_branches_for_scenario_open_line
-
 
 class GridMindHardEnv(GridMindContingenciesEnv):
     """Modified GridMind environment that uses the more difficult
@@ -2646,7 +2690,13 @@ class DiscreteVoltageControlGenAndShuntNoContingenciesEnv(
     Reward: Voltage movement only
     """
     # No contingencies.
-    LINES_TO_OPEN = None
+    def _compute_branches(self):
+        """No contingencies, do nothing."""
+        return None
+
+    def _set_branches_for_scenario(self):
+        """No contingencies, do nothing."""
+        return None
 
     # Voltage movement only reward.
     _compute_reward = _compute_reward_volt_change
@@ -2685,7 +2735,8 @@ class DiscreteVoltageControlGenAndShuntNoContingenciesEnv(
 class DiscreteVoltageControlSimpleEnv(DiscreteVoltageControlEnv):
     """Simplified version of the DiscreteVoltageControlEnv will use
     only bus magnitudes for observations, and will only consider voltage
-    movement in the reward (no generator var reserves).
+    movement in the reward (no generator var reserves). Additionally,
+    the only lines considered for opening will come from LINES_TO_OPEN.
     """
     # Use only bus per unit voltages in the observations.
     _get_observation = _get_observation_bus_pu_only
@@ -2694,6 +2745,11 @@ class DiscreteVoltageControlSimpleEnv(DiscreteVoltageControlEnv):
 
     # Use only bus voltage movement in the rewards.
     _compute_reward = _compute_reward_volt_change
+
+    # Draw branches to open from LINES_TO_OPEN, rather than all
+    # available branches.
+    _compute_branches = _compute_branches_from_lines_to_open
+    _set_branches_for_scenario = _set_branches_for_scenario_from_lines_to_open
 
 
 class DiscreteVoltageControlSimple14BusEnv(DiscreteVoltageControlSimpleEnv):
@@ -2705,9 +2761,6 @@ class DiscreteVoltageControlSimple14BusEnv(DiscreteVoltageControlSimpleEnv):
 
     # In the paper, the allowed lines are 1-5, 2-3, 4-5, and 7-9.
     LINES_TO_OPEN = LINES_TO_OPEN_14
-
-    # For each scenario, open a random line.
-    _set_branches_for_scenario = _set_branches_for_scenario_open_line
 
 
 class DiscreteVoltageControlGenState14BusEnv(

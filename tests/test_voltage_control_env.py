@@ -92,6 +92,18 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
         cls.saw.exit()
         cls.env.close()
 
+    def test_branches_to_open(self):
+        """Ensure branches_to_open is the right shape and is in the
+        appropriate range.
+        """
+        self.assertIsNotNone(self.env.branches_to_open)
+        self.assertEqual((self.num_scenarios,),
+                         self.env.branches_to_open.shape)
+        self.assertTrue(self.env.branches_to_open.min() >= 0)
+        self.assertTrue(
+            self.env.branches_to_open.max()
+            < self.env.branch_init_data.shape[0])
+
     def test_saw_load_state(self):
         """Ensure that calling saw.LoadState() works (testing that
         saw.SaveState() has already been called).
@@ -625,8 +637,11 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
         cls.env.close()
 
     def setUp(self) -> None:
-        """Reset the scenario index for each run."""
+        """Reset the scenario index for each run, and restore the
+        case.
+        """
         self.env.scenario_idx = 0
+        self.env.saw.LoadState()
 
     def test_scenario_idx_increments(self):
         """Ensure subsequent calls to reset update the scenario index.
@@ -712,7 +727,11 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
             with patch.object(self.env, 'gen_v', new=gen_v):
                 with patch.object(self.env, 'loads_mw', new=loads_mw):
                     with patch.object(self.env, 'loads_mvar', new=loads_mvar):
-                        self.env.reset()
+                        # Patch branches_to_open so a line does not get
+                        # opened.
+                        with patch.object(self.env, 'branches_to_open',
+                                          new=None):
+                            self.env.reset()
 
         # Pull the generator data from PowerWorld and ensure that both
         # the status and output match up.
@@ -839,6 +858,31 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
         self.env.last_action = 7
         self.env.reset()
         self.assertIsNone(self.env.last_action)
+
+    def test_branch_opened(self):
+        """Ensure branch is opened when reset is called."""
+        # Ensure the branch starts closed.
+        # Rely on the fact that our setup method sets the scenario index
+        # to 0.
+        branch_idx = self.env.branches_to_open[0]
+        branch = self.env.branch_init_data.iloc[branch_idx]
+        kf = self.env.branch_key_fields
+        branch_state = self.env.saw.GetParametersSingleElement(
+            ObjectType='branch',
+            ParamList=kf + ['LineStatus'],
+            Values=branch[kf].tolist() + [0]
+        )
+        self.assertEqual('Closed', branch_state['LineStatus'])
+
+        # Now call reset and ensure the branch is open.
+        self.env.reset()
+
+        branch_state = self.env.saw.GetParametersSingleElement(
+            ObjectType='branch',
+            ParamList=kf + ['LineStatus'],
+            Values=branch[kf].tolist() + [0]
+        )
+        self.assertEqual('Open', branch_state['LineStatus'])
 
 
 # noinspection DuplicatedCode
@@ -1310,6 +1354,22 @@ class GridMindControlEnv14BusInitTestCase(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         cls.env.close()
+
+    def test_branches_to_open(self):
+        """By default, branches_to_open should be None."""
+        self.assertIsNone(self.env.branches_to_open)
+
+    def test_set_branches_for_scenario_does_not_call_power_world(self):
+        """By default, branches_to_open should be None, and thus
+        calling _set_branches_for_scenario should not use the saw
+        object.
+        """
+        # Bad practice patching private method from external class.
+        with patch.object(self.env.saw, '_call_simauto') as p:
+            out = self.env._set_branches_for_scenario()
+
+        self.assertIsNone(out)
+        self.assertFalse(p.called)
 
     def test_loading(self):
         """Ensure all load values are set and are in bounds."""
@@ -2152,6 +2212,27 @@ class DiscreteVoltageControlGenState14BusEnvTestCase(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.env.close()
 
+    def test_branches_to_open(self):
+        """By default, branches_to_open should not be None."""
+        self.assertIsNotNone(self.env.branches_to_open)
+        self.assertEqual((self.env.num_scenarios,),
+                         self.env.branches_to_open.shape)
+        self.assertTrue(self.env.branches_to_open.min() >= 0)
+        self.assertTrue(self.env.branches_to_open.max()
+                        < len(self.env.LINES_TO_OPEN))
+
+    def test_set_branches_for_scenario_does_not_call_power_world(self):
+        """By default, branches_to_open should be None, and thus
+        calling _set_branches_for_scenario should not use the saw
+        object.
+        """
+        # Bad practice patching private method from external class.
+        with patch.object(self.env.saw, '_call_simauto') as p:
+            out = self.env._set_branches_for_scenario()
+
+        self.assertIsNone(out)
+        self.assertTrue(p.called)
+
     def test_observation_shape(self):
         # 14 buses, 5 generators.
         self.assertEqual((14+5,), self.env.observation_space.shape)
@@ -2265,6 +2346,27 @@ class DiscreteVoltageControlBranchState14BusEnvTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.env.scenario_idx = 0
         self.env.reset()
+
+    def test_branches_to_open(self):
+        """By default, branches_to_open should have an entry for each
+        scenario."""
+        self.assertIsNotNone(self.env.branches_to_open)
+        self.assertEqual((self.env.num_scenarios,),
+                         self.env.branches_to_open.shape)
+        self.assertTrue(self.env.branches_to_open.min() >= 0)
+        self.assertTrue(self.env.branches_to_open.max()
+                        < len(self.env.LINES_TO_OPEN))
+
+    def test_set_branches_for_scenario_does_not_call_power_world(self):
+        """Since branches_to_open should not be None,
+        _set_branches_for_scenario should call PowerWorld.
+        """
+        # Bad practice patching private method from external class.
+        with patch.object(self.env.saw, '_call_simauto') as p:
+            out = self.env._set_branches_for_scenario()
+
+        self.assertIsNone(out)
+        self.assertTrue(p.called)
 
     def test_observation_shape(self):
         # 14 buses, 4 "openable" lines.
@@ -2545,6 +2647,9 @@ class IL200BusShuntsTestCase(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         cls.env.close()
+
+    def test_branches_to_open_none(self):
+        self.assertIsNone(self.env.branches_to_open)
 
     def _shunt_action_helper(self, shunt_idx, start_state, finish_state):
         """The last action should toggle the last shunt. Ensure that
