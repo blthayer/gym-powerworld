@@ -1,8 +1,10 @@
 import unittest
 from unittest.mock import patch
 from gym_powerworld.envs import voltage_control_env
+# noinspection PyProtectedMember
 from gym_powerworld.envs.voltage_control_env import LOSS, \
-    MinLoadBelowMinGenError, MaxLoadAboveMaxGenError, OutOfScenariosError
+    MinLoadBelowMinGenError, MaxLoadAboveMaxGenError, OutOfScenariosError, \
+    MIN_V, MAX_V, MIN_V_SCALED, MAX_V_SCALED, _scale_voltages
 import os
 import pandas as pd
 import numpy as np
@@ -3194,6 +3196,21 @@ class DiscreteVoltageControlEnvFilterScenariosTestCase(unittest.TestCase):
 
         # Now, the scenario index should equal the number of successes.
         self.assertEqual(num_success, self.env.scenario_idx)
+
+
+class ScaleVoltagesTestCase(unittest.TestCase):
+    """Test _scale_voltages."""
+
+    # noinspection PyMethodMayBeStatic
+    def test_works(self):
+        # Assuming MIN_V is 0.7 and MAX_V is 1.2, this array should be
+        # [0.7, 0.95, 1.2]
+        a = np.array([MIN_V, MIN_V + (MAX_V - MIN_V)/2, MAX_V])
+        # Assuming MIN_V_SCALED is 0 and MAX_V_SCALED is 1, expected
+        # should be [0, 0.5, 1]
+        expected = np.array([MIN_V_SCALED, (MAX_V_SCALED - MIN_V_SCALED)/2,
+                             MAX_V_SCALED])
+        np.testing.assert_allclose(expected, _scale_voltages(a))
 
 #
 # # noinspection DuplicatedCode

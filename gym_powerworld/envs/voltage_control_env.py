@@ -68,6 +68,24 @@ STATE_MAP = {
     0.0: 'Open'
 }
 
+# Some environments may reject scenarios with a certain voltage range.
+MIN_V = 0.7
+MAX_V = 1.2
+
+# Some environments may min/max scale voltages.
+MIN_V_SCALED = 0
+MAX_V_SCALED = 1
+# https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.MinMaxScaler.html
+V_SCALER = (MAX_V_SCALED - MIN_V_SCALED) / (MAX_V - MIN_V)
+V_ADD_TERM = MIN_V_SCALED - MIN_V * V_SCALER
+
+
+def _scale_voltages(arr_in: np.ndarray) -> np.ndarray:
+    """Scale voltages which are assumed to already be on interval
+    [MIN_V, MAX_V] to the interval [MIN_V_SCALED, MAX_V_SCALED]
+    """
+    return V_SCALER * arr_in + V_ADD_TERM
+
 
 def _set_gens_for_scenario_gen_mw_and_v_set_point(self) -> None:
     """Set generator Open/Closed states and set Gen MW setpoints based
