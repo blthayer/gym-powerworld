@@ -360,7 +360,8 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                  image_dir: str = None,
                  render_interval: float = 1.0,
                  log_buffer: int = 10000,
-                 csv_logfile: str = 'log.csv'):
+                 csv_logfile: str = 'log.csv',
+                 truncate_voltages=False):
         """Initialize the environment. Pull data needed up front,
         create gen/loading cases, perform case checks, etc.
 
@@ -446,6 +447,9 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             to file.
         :param csv_logfile: Path to .csv file which will be used to
             log states/actions.
+        :param truncate_voltages: Whether (True) or not (False) to
+            consider a power flow solution with voltages outside of
+            [MIN_V, MAX_V] to be failed.
         """
         ################################################################
         # Logging, seeding, SAW initialization, simple attributes
@@ -652,6 +656,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # TODO: This isn't necessary if the logic for ensuring voltage
         #   set points for generators at the same bus are the same is
         #   improved.
+        # noinspection PyUnresolvedReferences
         if not (self.gen_init_data['BusNum']
                 == self.gen_init_data['GenRegNum']).all():
             raise UserWarning(
@@ -805,6 +810,14 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Keep an array that tells us if the scenario was successfully
         # initialized.
         self.scenario_init_success = np.zeros(self.num_scenarios, dtype=bool)
+
+        ################################################################
+        # Set _solve_and_observe to appropriate method.
+        ################################################################
+        if truncate_voltages:
+            self._solve_and_observe = self._solve_and_observe_truncate
+        else:
+            self._solve_and_observe = self._solve_and_observe_default
 
         ################################################################
         # Solve power flow, save state.
@@ -1343,7 +1356,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                 # If we're here, the key is valid. Set it.
                 self.rewards[key] = value
 
-    def _solve_and_observe(self):
+    def _solve_and_observe_default(self):
         """Helper to solve the power flow and get an observation.
 
         :raises PowerWorldError: If PowerWorld fails to solve the power
@@ -1355,6 +1368,31 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
 
         # Get new observations, rotate old ones.
         self._rotate_and_get_observation_frames()
+
+        # Get and return a properly arranged observation.
+        return self._get_observation()
+
+    def _solve_and_observe_truncate(self):
+        """Helper to solve the power flow and get an observation.
+        The case will be considered to "fail" if voltages are outside
+        the [MIN_V, MAX_V] range.
+
+        :raises PowerWorldError: If PowerWorld fails to solve the power
+            flow or voltages are outside of [MIN_V, MAX_V].
+        """
+        # Start by solving the power flow. This will raise a
+        # PowerWorldError if it fails to solve.
+        self.saw.SolvePowerFlow()
+
+        # Get new observations, rotate old ones.
+        self._rotate_and_get_observation_frames()
+
+        # noinspection PyArgumentList
+        if ((self.bus_pu_volt_arr.min() < self.dtype(MIN_V))
+                or (self.bus_pu_volt_arr.max() > self.dtype(MAX_V))):
+            raise PowerWorldError(
+                'Scenario rejected as there was at least one bus voltage '
+                f'less than {MIN_V:.2f} or greater than {MAX_V:.2f}')
 
         # Get and return a properly arranged observation.
         return self._get_observation()
@@ -2536,35 +2574,6 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         # Send command to PowerWorld.
         self.saw.change_parameters_multiple_element_df(
             ObjectType='shunt', command_df=shunts)
-
-
-class DiscreteVoltageControlEnvVoltBounds(DiscreteVoltageControlEnv):
-    """Modified version of DiscreteVoltageControlEnv which rejects
-    scenarios with voltages outside of [MIN_V, MAX_V].
-    """
-    def _solve_and_observe(self):
-        """Helper to solve the power flow and get an observation.
-        The case will be considered to "fail" if voltages are outside
-        the [MIN_V, MAX_V] range.
-
-        :raises PowerWorldError: If PowerWorld fails to solve the power
-            flow or voltages are outside of [MIN_V, MAX_V].
-        """
-        # Start by solving the power flow. This will raise a
-        # PowerWorldError if it fails to solve.
-        self.saw.SolvePowerFlow()
-
-        # Get new observations, rotate old ones.
-        self._rotate_and_get_observation_frames()
-
-        if ((self.bus_pu_volt_arr.min() < self.dtype(MIN_V))
-                or (self.bus_pu_volt_arr.max() > self.dtype(MAX_V))):
-            raise PowerWorldError(
-                'Scenario rejected as there was at least one bus voltage '
-                f'less than {MIN_V:.2f} or greater than {MAX_V:.2f}')
-
-        # Get and return a properly arranged observation.
-        return self._get_observation()
 
 
 class GridMindEnv(DiscreteVoltageControlEnvBase):

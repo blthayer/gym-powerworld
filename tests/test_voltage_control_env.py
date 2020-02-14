@@ -3214,7 +3214,9 @@ class ScaleVoltagesTestCase(unittest.TestCase):
 
 
 class DiscreteVoltageControlEnvVoltBoundsTestCase(unittest.TestCase):
-    """Test the DiscreteVoltageControlEnvVoltBounds class."""
+    """Test using the truncate_voltages parameter to cause
+    power flows to count as failed if the voltages are out of range.
+    """
     @classmethod
     def setUpClass(cls) -> None:
         # Initialize the environment. Then, we'll use individual test
@@ -3232,8 +3234,9 @@ class DiscreteVoltageControlEnvVoltBoundsTestCase(unittest.TestCase):
         cls.seed = 18
         cls.log_level = logging.INFO
         cls.dtype = np.float32
+        cls.truncate_voltages = True
 
-        cls.env = voltage_control_env.DiscreteVoltageControlEnvVoltBounds(
+        cls.env = voltage_control_env.DiscreteVoltageControlEnv(
             pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
             max_load_factor=cls.max_load_factor,
             min_load_factor=cls.min_load_factor,
@@ -3244,7 +3247,8 @@ class DiscreteVoltageControlEnvVoltBoundsTestCase(unittest.TestCase):
             gen_voltage_range=cls.gen_voltage_range,
             seed=cls.seed,
             log_level=logging.INFO,
-            dtype=cls.dtype
+            dtype=cls.dtype,
+            truncate_voltages=cls.truncate_voltages
         )
 
     # noinspection PyUnresolvedReferences
