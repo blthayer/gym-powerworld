@@ -884,6 +884,25 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
         )
         self.assertEqual('Open', branch_state['LineStatus'])
 
+    def test_scenario_init_success_array_properly_updated(self):
+        """Ensure the scenario_init_success array gets updated as it
+        should.
+        """
+        # Patch _solve_and_observe to sometimes succeed, sometimes fail.
+        se = [None, PowerWorldError('stuff'), PowerWorldError('stuff'), None]
+        with patch.object(self.env, '_solve_and_observe', side_effect=se):
+            with patch.object(self.env, '_add_to_log'):
+                # Run reset twice, as that's all that is required since
+                # it'll keep trying on failures.
+                for _ in range(2):
+                    self.env.reset()
+
+        # Test.
+        expected = np.array([True if x is None else False for x in se])
+        np.testing.assert_array_equal(
+            expected, self.env.scenario_init_success[0:4]
+        )
+
 
 # noinspection DuplicatedCode
 class DiscreteVoltageControlEnv14BusStepTestCase(unittest.TestCase):
@@ -3093,6 +3112,88 @@ class TX2000BusShuntsTapsGensTestCase(unittest.TestCase):
     #     ratio = self.env.reset_successes / self.env.num_scenarios
     #     self.assertGreaterEqual(ratio, 0.9)
     #     print(f'Success ratio: {ratio:.3f}')
+
+
+# noinspection DuplicatedCode
+class DiscreteVoltageControlEnvFilterScenariosTestCase(unittest.TestCase):
+    """Test the filter_scenarios method of the environment."""
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 10
+        cls.max_load_factor = 2
+        cls.min_load_factor = 0.5
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.8
+        cls.num_gen_voltage_bins = 9
+        cls.gen_voltage_range = (0.9, 1.1)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+
+        cls.env = voltage_control_env.DiscreteVoltageControlEnv(
+            pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
+            max_load_factor=cls.max_load_factor,
+            min_load_factor=cls.min_load_factor,
+            min_load_pf=cls.min_load_pf,
+            lead_pf_probability=cls.lead_pf_probability,
+            load_on_probability=cls.load_on_probability,
+            num_gen_voltage_bins=cls.num_gen_voltage_bins,
+            gen_voltage_range=cls.gen_voltage_range,
+            seed=cls.seed,
+            log_level=logging.INFO,
+            dtype=cls.dtype
+        )
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.close()
+
+    def setUp(self) -> None:
+        """Reset the scenario index for each run, and restore the
+        case.
+        """
+        self.env.scenario_idx = 0
+        self.env.saw.LoadState()
+
+    def test_filter(self):
+        """Ensure the filtering is successful."""
+        # Create a filter in which every other scenario is feasible.
+        num_success = int(self.num_scenarios / 2)
+        mask = np.array([True, False] * num_success)
+
+        # Perform the filtering.
+        self.env.filter_scenarios(mask)
+
+        # Check shapes.
+        all_none = True
+        for attr in self.env.SCENARIO_INIT_ATTRIBUTES:
+            arr = getattr(self.env, attr)
+            if arr is None:
+                continue
+            all_none = False
+            self.assertEqual(num_success, arr.shape[0])
+
+        self.assertFalse(all_none)
+
+        # Run reset until we exhaust the scenarios. Patch SolvePowerFlow
+        # so we always have a success.
+        with patch.object(self.env.saw, 'SolvePowerFlow'):
+            i = 0
+            while i < self.num_scenarios:
+                try:
+                    self.env.reset()
+                except OutOfScenariosError:
+                    break
+                i += 1
+
+        # Now, the scenario index should equal the number of successes.
+        self.assertEqual(num_success, self.env.scenario_idx)
 
 #
 # # noinspection DuplicatedCode

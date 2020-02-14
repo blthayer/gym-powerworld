@@ -144,6 +144,17 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     """
 
     ####################################################################
+    # Concrete class properties
+    ####################################################################
+    # The following parameters are all related to scenario
+    # initialization.
+    # TODO: Update as needed. For instance, add LTC params when we get
+    #   there.
+    SCENARIO_INIT_ATTRIBUTES = ['total_load_mw', 'loads_mw', 'loads_mvar',
+                                'shunt_states', 'gen_mw', 'gen_v',
+                                'branches_to_open']
+
+    ####################################################################
     # Abstract class properties
     ####################################################################
 
@@ -771,6 +782,13 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self.log_flush_count = 0
 
         ################################################################
+        # Scenario success tracking
+        ################################################################
+        # Keep an array that tells us if the scenario was successfully
+        # initialized.
+        self.scenario_init_success = np.zeros(self.num_scenarios, dtype=bool)
+
+        ################################################################
         # Solve power flow, save state.
         ################################################################
         # Solve the initial power flow, and save the state for later
@@ -901,7 +919,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self.last_action = None
 
         done = False
-
+        obs = None
         while (not done) & (self.scenario_idx < self.num_scenarios):
             # Load the initial state of the system to avoid getting
             # stuck in a low voltage solution from a previous solve.
@@ -921,6 +939,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             except PowerWorldError as exc:
                 # This scenario is bad. Move on.
                 self.reset_failures += 1
+                self.scenario_init_success[self.scenario_idx] = False
                 self.log.warning(
                     f'Scenario {self.scenario_idx} failed. Error message: '
                     f'{exc.args[0]}')
@@ -929,6 +948,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                 # Success! The power flow solved. Signify we're done
                 # looping.
                 self.reset_successes += 1
+                self.scenario_init_success[self.scenario_idx] = True
                 done = True
             finally:
                 # Always increment the scenario index.
@@ -938,7 +958,6 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self._add_to_log(action=np.nan)
 
         # Raise exception if we've gone through all the scenarios.
-        # noinspection PyUnboundLocalVariable
         if (self.scenario_idx >= self.num_scenarios) and (obs is None):
             raise OutOfScenariosError('We have gone through all scenarios.')
 
@@ -1031,6 +1050,35 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
 
         # All done.
         return None
+
+    def filter_scenarios(self, mask):
+        """Using a boolean mask of shape (self.num_scenarios,), filter
+        all the scenario related data. This is useful if you want to
+        pre-screen scenarios which are invalid.
+        """
+        # Simply loop and filter.
+        for attr in self.SCENARIO_INIT_ATTRIBUTES:
+
+            arr = getattr(self, attr)
+
+            # Nothing to do if the array is actually None.
+            if arr is None:
+                continue
+
+            # index 1-d arrays differently than 2-d arrays.
+            s = len(arr.shape)
+            if s == 1:
+                filtered_arr = arr[mask]
+            elif s == 2:
+                filtered_arr = arr[mask, :]
+            else:
+                raise UserWarning('Something odd is afoot.')
+
+            # Overwrite.
+            setattr(self, attr, filtered_arr)
+
+        # Adjust the number of scenarios.
+        self.num_scenarios = mask.sum()
 
     ####################################################################
     # Private methods
