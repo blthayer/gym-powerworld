@@ -361,7 +361,8 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                  render_interval: float = 1.0,
                  log_buffer: int = 10000,
                  csv_logfile: str = 'log.csv',
-                 truncate_voltages=False):
+                 truncate_voltages=False,
+                 scale_voltage_obs=False):
         """Initialize the environment. Pull data needed up front,
         create gen/loading cases, perform case checks, etc.
 
@@ -450,6 +451,9 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         :param truncate_voltages: Whether (True) or not (False) to
             consider a power flow solution with voltages outside of
             [MIN_V, MAX_V] to be failed.
+        :param scale_voltage_obs: Whether (True) or not (False) to
+            scale bus voltage observations. Cannot be True if
+            truncate_voltages is False.
         """
         ################################################################
         # Logging, seeding, SAW initialization, simple attributes
@@ -812,8 +816,16 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self.scenario_init_success = np.zeros(self.num_scenarios, dtype=bool)
 
         ################################################################
-        # Set _solve_and_observe to appropriate method.
+        # Manage voltage truncation and scaling.
         ################################################################
+        if scale_voltage_obs and (not truncate_voltages):
+            raise ValueError('If scale_voltage_obs is True, truncate_voltages '
+                             'must be True.')
+
+        # Simply set scale_votlage_obs attribute.
+        self.scale_voltage_obs = scale_voltage_obs
+
+        # Determine which _solve_and_observe method to use.
         if truncate_voltages:
             self._solve_and_observe = self._solve_and_observe_truncate
         else:
@@ -872,6 +884,14 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     def bus_pu_volt_arr(self) -> np.ndarray:
         """Bus per unit voltages as a numpy array."""
         return self.bus_obs_data['BusPUVolt'].to_numpy(dtype=self.dtype)
+
+    @property
+    def bus_pu_volt_arr_scaled(self) -> np.ndarray:
+        """(Possibly) scaled per unit bus voltages as a numpy array."""
+        if self.scale_voltage_obs:
+            return _scale_voltages(self.bus_pu_volt_arr)
+        else:
+            return self.bus_pu_volt_arr
 
     @property
     def gen_volt_set_arr(self) -> np.ndarray:
@@ -1387,6 +1407,8 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Get new observations, rotate old ones.
         self._rotate_and_get_observation_frames()
 
+        # Reject this power flow solution if voltages are below the min
+        # or above the max.
         # noinspection PyArgumentList
         if ((self.bus_pu_volt_arr.min() < self.dtype(MIN_V))
                 or (self.bus_pu_volt_arr.max() > self.dtype(MAX_V))):
@@ -2133,7 +2155,9 @@ def _set_branches_for_scenario_from_lines_to_open(self: DiscreteVoltageControlEn
 
 def _get_observation_bus_pu_only(
         self: DiscreteVoltageControlEnvBase) -> np.ndarray:
-    return self.bus_pu_volt_arr
+    # Note the voltage will only be scaled if self.scale_voltage_obs
+    # is True. Otherwise, it'll be raw voltages.
+    return self.bus_pu_volt_arr_scaled
 
 
 def _get_num_obs_and_space_v_only(
@@ -2501,7 +2525,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         # need to scale per unit data.
         return np.concatenate([
             # Bus voltages.
-            self.bus_obs_data['BusPUVolt'].to_numpy(dtype=self.dtype),
+            _get_observation_bus_pu_only(self),
             # Generator active power divide by maximum active power.
             (self.gen_obs_data['GenMW']
              / self.gen_obs_data['GenMWMax']).to_numpy(dtype=self.dtype),
@@ -2808,8 +2832,11 @@ class DiscreteVoltageControlGenAndShuntNoContingenciesEnv(
     def _get_observation(self) -> np.ndarray:
         """Concatenate bus voltages, generator states, and shunt states.
         """
+        # Note the voltage will only be scaled if self.scale_voltage_obs
+        # is True. Otherwise, it'll be raw voltages.
         return np.concatenate(
-            (self.bus_pu_volt_arr, self.gen_status_arr, self.shunt_status_arr)
+            (self.bus_pu_volt_arr_scaled, self.gen_status_arr,
+             self.shunt_status_arr)
         )
 
     def _get_observation_failed_pf(self):
@@ -2878,7 +2905,9 @@ class DiscreteVoltageControlGenState14BusEnv(
         # Initialize.
         out = np.zeros(self.observation_space.shape, dtype=self.dtype)
         # Put bus voltages in the first slots.
-        out[0:self.num_buses] = self.bus_pu_volt_arr
+        # Note the voltage will only be scaled if self.scale_voltage_obs
+        # is True. Otherwise, it'll be raw voltages.
+        out[0:self.num_buses] = self.bus_pu_volt_arr_scaled
         # Put gen states in the remaining slots.
         out[self.num_buses:] = self.gen_status_arr
         return out
@@ -2929,7 +2958,9 @@ class DiscreteVoltageControlBranchState14BusEnv(
         # Initialize.
         out = np.zeros(self.observation_space.shape, dtype=self.dtype)
         # Fill first part with voltage.
-        out[0:self.num_buses] = self.bus_pu_volt_arr
+        # Note the voltage will only be scaled if self.scale_voltage_obs
+        # is True. Otherwise, it'll be raw voltages.
+        out[0:self.num_buses] = self.bus_pu_volt_arr_scaled
         # Fill remaining with line states.
         out[self.num_buses:] = self._get_branch_state_14()
         # Done.
@@ -2962,7 +2993,9 @@ class DiscreteVoltageControlBranchAndGenState14BusEnv(
         # Initialize.
         out = np.zeros(self.observation_space.shape, dtype=self.dtype)
         # Fill first part with voltage.
-        out[0:self.num_buses] = self.bus_pu_volt_arr
+        # Note the voltage will only be scaled if self.scale_voltage_obs
+        # is True. Otherwise, it'll be raw voltages.
+        out[0:self.num_buses] = self.bus_pu_volt_arr_scaled
         # Fill the line and generator states.
         return self._fill_gen_and_line_states(out)
 

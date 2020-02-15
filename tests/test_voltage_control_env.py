@@ -3216,6 +3216,7 @@ class ScaleVoltagesTestCase(unittest.TestCase):
 class DiscreteVoltageControlEnvVoltBoundsTestCase(unittest.TestCase):
     """Test using the truncate_voltages parameter to cause
     power flows to count as failed if the voltages are out of range.
+    We'll also test scaled voltage observations.
     """
     @classmethod
     def setUpClass(cls) -> None:
@@ -3255,6 +3256,10 @@ class DiscreteVoltageControlEnvVoltBoundsTestCase(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         cls.env.close()
+
+    def setUp(self) -> None:
+        self.env.scenario_idx = 0
+        self.env.reset()
 
     def patch_helper(self, df, exc=True):
         with patch.object(self.env.saw, 'SolvePowerFlow') as p:
@@ -3300,6 +3305,39 @@ class DiscreteVoltageControlEnvVoltBoundsTestCase(unittest.TestCase):
 
         self.patch_helper(df, False)
 
+    def test_scaled_voltage_observation(self):
+        """Ensure that getting an observation correctly scales
+        voltages.
+        """
+        arr = np.ones(self.env.num_buses, dtype=self.env.dtype)
+        arr[0] = MIN_V
+        arr[-1] = MAX_V
+        df = pd.DataFrame({'BusPUVolt': arr})
+        with patch.object(self.env, 'scale_voltage_obs', new=True):
+            with patch.object(self.env, 'bus_obs_data', new=df):
+                obs = self.env._get_observation()
+
+        v = obs[0:self.env.num_buses]
+
+        self.assertAlmostEqual(v[0], MIN_V_SCALED, 6)
+        self.assertAlmostEqual(v[-1], MAX_V_SCALED, 6)
+
+    def test_unscaled_voltage_observation(self):
+        """Ensure that getting an observation correctly scales
+        voltages.
+        """
+        arr = np.ones(self.env.num_buses, dtype=self.env.dtype)
+        arr[0] = MIN_V
+        arr[-1] = MAX_V
+        df = pd.DataFrame({'BusPUVolt': arr})
+        with patch.object(self.env, 'scale_voltage_obs', new=False):
+            with patch.object(self.env, 'bus_obs_data', new=df):
+                obs = self.env._get_observation()
+
+        v = obs[0:self.env.num_buses]
+
+        self.assertAlmostEqual(v[0], MIN_V, 6)
+        self.assertAlmostEqual(v[-1], MAX_V, 6)
 #
 # # noinspection DuplicatedCode
 # class GridMindHardSolveTestCase(unittest.TestCase):
