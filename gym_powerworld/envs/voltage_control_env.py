@@ -2288,8 +2288,8 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         # generator per bus. Shunts are toggle, so only need one action
         # per shunt. +1 for no-op action.
         self.action_space = spaces.Discrete(
-            self.num_gen_reg_buses * num_gen_voltage_bins
-            + self.num_shunts + 1)
+            int(self.num_gen_reg_buses * num_gen_voltage_bins
+                + self.num_shunts + 1))
 
         # The gen action array is a mapping where the first row entry
         # is a generator bus number which can be used with
