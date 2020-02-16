@@ -1091,7 +1091,9 @@ class DiscreteVoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
         cls.lead_pf_probability = 0.1
         cls.load_on_probability = 0.8
         cls.num_gen_voltage_bins = 9
-        cls.gen_voltage_range = (0.9, 1.1)
+        cls.gen_voltage_range = (0.95, 1.05)
+        cls.low_v = 0.95
+        cls.high_v = 1.05
         cls.seed = 18
         cls.log_level = logging.INFO
         cls.dtype = np.float32
@@ -1118,7 +1120,9 @@ class DiscreteVoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
             seed=cls.seed,
             log_level=logging.INFO,
             rewards=cls.rewards,
-            dtype=cls.dtype
+            dtype=cls.dtype,
+            low_v=cls.low_v,
+            high_v=cls.high_v
         )
 
     # noinspection PyUnresolvedReferences
@@ -3236,6 +3240,7 @@ class DiscreteVoltageControlEnvVoltBoundsTestCase(unittest.TestCase):
         cls.log_level = logging.INFO
         cls.dtype = np.float32
         cls.truncate_voltages = True
+        cls.scale_voltage_obs = True
 
         cls.env = voltage_control_env.DiscreteVoltageControlEnv(
             pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
@@ -3249,7 +3254,8 @@ class DiscreteVoltageControlEnvVoltBoundsTestCase(unittest.TestCase):
             seed=cls.seed,
             log_level=logging.INFO,
             dtype=cls.dtype,
-            truncate_voltages=cls.truncate_voltages
+            truncate_voltages=cls.truncate_voltages,
+            scale_voltage_obs=cls.scale_voltage_obs
         )
 
     # noinspection PyUnresolvedReferences
@@ -3338,6 +3344,13 @@ class DiscreteVoltageControlEnvVoltBoundsTestCase(unittest.TestCase):
 
         self.assertAlmostEqual(v[0], MIN_V, 6)
         self.assertAlmostEqual(v[-1], MAX_V, 6)
+
+    def test_obs_space(self):
+        """Voltage maximum should be 1."""
+        np.testing.assert_array_equal(
+            np.ones(self.env.num_buses, dtype=self.env.dtype),
+            self.env.observation_space.high[0:self.env.num_buses]
+        )
 #
 # # noinspection DuplicatedCode
 # class GridMindHardSolveTestCase(unittest.TestCase):

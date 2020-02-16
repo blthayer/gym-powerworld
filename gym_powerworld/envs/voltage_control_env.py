@@ -765,6 +765,22 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self.branches_to_open = self._compute_branches()
 
         ################################################################
+        # Manage voltage truncation and scaling.
+        ################################################################
+        if scale_voltage_obs and (not truncate_voltages):
+            raise ValueError('If scale_voltage_obs is True, truncate_voltages '
+                             'must be True.')
+
+        # Simply set scale_voltage_obs attribute.
+        self.scale_voltage_obs = scale_voltage_obs
+
+        # Determine which _solve_and_observe method to use.
+        if truncate_voltages:
+            self._solve_and_observe = self._solve_and_observe_truncate
+        else:
+            self._solve_and_observe = self._solve_and_observe_default
+
+        ################################################################
         # Observation space definition
         ################################################################
         self.num_obs, self.observation_space = self._get_num_obs_and_space()
@@ -814,22 +830,6 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Keep an array that tells us if the scenario was successfully
         # initialized.
         self.scenario_init_success = np.zeros(self.num_scenarios, dtype=bool)
-
-        ################################################################
-        # Manage voltage truncation and scaling.
-        ################################################################
-        if scale_voltage_obs and (not truncate_voltages):
-            raise ValueError('If scale_voltage_obs is True, truncate_voltages '
-                             'must be True.')
-
-        # Simply set scale_votlage_obs attribute.
-        self.scale_voltage_obs = scale_voltage_obs
-
-        # Determine which _solve_and_observe method to use.
-        if truncate_voltages:
-            self._solve_and_observe = self._solve_and_observe_truncate
-        else:
-            self._solve_and_observe = self._solve_and_observe_default
 
         ################################################################
         # Solve power flow, save state.
@@ -2165,9 +2165,14 @@ def _get_num_obs_and_space_v_only(
     """Number of observations is simply the number of buses,
     observation space is a box for voltages.
     """
-    # Voltages should never get above 2 p.u.
+    # Set voltage cap at 2 if we're not scaling, set to 1 otherwise.
+    if self.scale_voltage_obs:
+        high = 1
+    else:
+        high = 2
+
     return self.num_buses, spaces.Box(
-        low=0, high=2, shape=(self.num_buses,), dtype=self.dtype)
+        low=0, high=high, shape=(self.num_buses,), dtype=self.dtype)
 
 
 def _get_observation_failed_pf_volt_only(self: DiscreteVoltageControlEnvBase)\
@@ -2416,7 +2421,10 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         low = np.zeros(num_obs, dtype=self.dtype)
         # Put a cap of 2 p.u. voltage on observations - I don't see how
         # bus voltages could ever get that high.
-        bus_high = np.ones(self.num_buses, dtype=self.dtype) + 1
+        bus_high = np.ones(self.num_buses, dtype=self.dtype)
+        if not self.scale_voltage_obs:
+            bus_high += 1
+
         # The rest will have a maximum of 1.
         rest_high = np.ones(3 * self.num_gens + 3 * self.num_loads,
                             dtype=self.dtype)
@@ -2859,7 +2867,8 @@ class DiscreteVoltageControlGenAndShuntNoContingenciesEnv(
         low = np.zeros(n, dtype=self.dtype)
         # High will be 2 for bus voltages, 1 for everything else.
         high = np.ones(n, dtype=self.dtype)
-        high[0:self.num_buses] = 2
+        if not self.scale_voltage_obs:
+            high[0:self.num_buses] = 2
         return n, spaces.Box(low=low, high=high, dtype=self.dtype)
 
 
@@ -2933,7 +2942,8 @@ class DiscreteVoltageControlGenState14BusEnv(
         n = self.num_buses + self.num_gens
         low = np.zeros(n)
         high = np.ones(n)
-        high[0:self.num_buses] = 2
+        if not self.scale_voltage_obs:
+            high[0:self.num_buses] = 2
         return n, spaces.Box(low=low, high=high, dtype=self.dtype)
 
 
@@ -2982,7 +2992,8 @@ class DiscreteVoltageControlBranchState14BusEnv(
         low = np.zeros(n)
         high = np.ones(n)
         # Voltages can go above one.
-        high[0:self.num_buses] = 2
+        if not self.scale_voltage_obs:
+            high[0:self.num_buses] = 2
         return n, spaces.Box(low=low, high=high, dtype=self.dtype)
 
 
@@ -3022,7 +3033,8 @@ class DiscreteVoltageControlBranchAndGenState14BusEnv(
         low = np.zeros(n)
         high = np.ones(n)
         # Voltages can go above one.
-        high[0:self.num_buses] = 2
+        if not self.scale_voltage_obs:
+            high[0:self.num_buses] = 2
         return n, spaces.Box(low=low, high=high, dtype=self.dtype)
 
 
