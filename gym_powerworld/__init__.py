@@ -47,3 +47,9 @@ register(
     entry_point=
         'gym_powerworld.envs:DiscreteVoltageControlGenAndShuntNoContingenciesEnv'
 )
+
+register(
+    id='powerworld-discrete-env-branch-and-gen-state-clipped-reward-14-bus-v0',
+    entry_point=
+        'gym_powerworld.envs:DiscreteVoltageControlBranchAndGenStateClippedReward14BusEnv'
+)

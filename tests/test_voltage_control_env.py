@@ -1677,8 +1677,8 @@ class GridMindControlEnv14BusMiscTestCase(unittest.TestCase):
         self.env.reset()
         self.assertEqual(self.env.cumulative_reward, 0)
 
-    def test_compute_failed_pf_reward(self):
-        self.assertEqual(self.env._compute_failed_pf_reward(), -100)
+    def test_compute_reward_failed_pf(self):
+        self.assertEqual(self.env._compute_reward_failed_pf(), -100)
 
     def test_get_observation(self):
         df = pd.DataFrame([[1., 'a'], [2., 'b']],
@@ -2617,6 +2617,161 @@ class DiscreteVoltageControlBranchAndGenState14BusEnvTestCase(
         # Test.
         np.testing.assert_array_equal(line_expected, line_arr)
         np.testing.assert_array_equal(gen_expected, gen_arr)
+
+
+# noinspection DuplicatedCode
+class DiscreteVoltageControlBranchAndGenStateClippedReward14BusEnvTestCase(
+        unittest.TestCase):
+    """Quick testing of
+    DiscreteVoltageControlBranchAndGenStateClippedReward14BusEnv.
+    Specifically, we'll be testing the
+    _compute_reward_volt_change_clipped and
+    _compute_reward_failed_power_flow_clipped methods which it uses.
+    """
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Initialize the environment. Then, we'll use individual test
+        # methods to test various attributes, methods, etc.
+
+        # Define inputs to the constructor.
+        cls.num_scenarios = 1000
+        cls.max_load_factor = 1.4
+        cls.min_load_factor = 0.6
+        cls.min_load_pf = 0.8
+        cls.lead_pf_probability = 0.1
+        cls.load_on_probability = 0.9
+        cls.num_gen_voltage_bins = 5
+        cls.gen_voltage_range = (0.95, 1.05)
+        cls.seed = 18
+        cls.log_level = logging.INFO
+        cls.dtype = np.float32
+        cls.log_buffer = 1000
+        cls.csv_logfile = 'log.csv'
+        cls.truncate_voltages = True
+        cls.scale_voltage_obs = True
+
+        # Ensure we remove the logfile if it was created by other
+        # test cases.
+        try:
+            os.remove(cls.csv_logfile)
+        except FileNotFoundError:
+            pass
+
+        cls.env = \
+            voltage_control_env.DiscreteVoltageControlBranchAndGenStateClippedReward14BusEnv(
+                pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
+                max_load_factor=cls.max_load_factor,
+                min_load_factor=cls.min_load_factor,
+                min_load_pf=cls.min_load_pf,
+                lead_pf_probability=cls.lead_pf_probability,
+                load_on_probability=cls.load_on_probability,
+                num_gen_voltage_bins=cls.num_gen_voltage_bins,
+                gen_voltage_range=cls.gen_voltage_range,
+                seed=cls.seed,
+                log_level=logging.INFO,
+                dtype=cls.dtype,
+                log_buffer=cls.log_buffer,
+                csv_logfile=cls.csv_logfile,
+                truncate_voltages=True,
+                scale_voltage_obs=True
+            )
+
+    # noinspection PyUnresolvedReferences
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.close()
+
+    def setUp(self) -> None:
+        # Replace the voltage DataFrames for each run. It'll simply be
+        # 6 voltage measurements initialized to 1.
+        self.env.bus_obs_data = pd.DataFrame({'BusPUVolt': np.ones(6)})
+        self.env.bus_obs_data_prev = pd.DataFrame({'BusPUVolt': np.ones(6)})
+
+    def test_all_in(self):
+        self.assertEqual(1.0, self.env._compute_reward())
+
+    def test_fail(self):
+        self.assertEqual(-1.0, self.env._compute_reward_failed_pf())
+
+    def test_two_voltages_move_in(self):
+        # Move two from out to in.
+        self.env.bus_obs_data_prev.iloc[0]['BusPUVolt'] = 0.94
+        self.env.bus_obs_data_prev.iloc[-1]['BusPUVolt'] = 1.06
+
+        # Ensure at least one stays out of bounds.
+        self.env.bus_obs_data_prev.iloc[3]['BusPUVolt'] = 0.949
+        self.env.bus_obs_data.iloc[3]['BusPUVolt'] = 0.94
+
+        self.assertEqual(0.75, self.env._compute_reward())
+
+    def test_no_op_action_reward(self):
+        with patch.object(self.env, 'last_action', new=0):
+            self.assertEqual(0.0, self.env._compute_reward())
+
+    def test_one_voltage_moves_in(self):
+        # Move one bus from out to in.
+        self.env.bus_obs_data_prev.iloc[4]['BusPUVolt'] = 0.949
+        self.env.bus_obs_data.iloc[4]['BusPUVolt'] = 0.95000001
+
+        # Ensure at least one stays out of bounds.
+        self.env.bus_obs_data_prev.iloc[3]['BusPUVolt'] = 0.949
+        self.env.bus_obs_data.iloc[3]['BusPUVolt'] = 0.94
+
+        self.assertEqual(0.5, self.env._compute_reward())
+
+    def test_three_in_one_out(self):
+        # Move three from out to in.
+        self.env.bus_obs_data_prev.iloc[0]['BusPUVolt'] = 0.94
+        self.env.bus_obs_data_prev.iloc[-1]['BusPUVolt'] = 1.06
+        self.env.bus_obs_data_prev.iloc[2]['BusPUVolt'] = 1.1
+
+        # Move one from in to out.
+        self.env.bus_obs_data.iloc[3]['BusPUVolt'] = 0.94
+
+        self.assertEqual(0.75, self.env._compute_reward())
+
+    def test_two_move_out(self):
+        # Move two buses out of range.
+        self.env.bus_obs_data.iloc[2]['BusPUVolt'] = 1.08
+        self.env.bus_obs_data.iloc[3]['BusPUVolt'] = 0.9
+
+        self.assertEqual(-0.75, self.env._compute_reward())
+
+    def test_one_moves_out_net(self):
+        # Move two buses out of range.
+        self.env.bus_obs_data.iloc[1]['BusPUVolt'] = 1.06
+        self.env.bus_obs_data.iloc[0]['BusPUVolt'] = 0.92
+
+        # Move one in range.
+        self.env.bus_obs_data_prev.iloc[4]['BusPUVolt'] = 0.93
+
+        self.assertEqual(-0.5, self.env._compute_reward())
+
+    def test_bad_move_right_direction(self):
+        self.env.bus_obs_data_prev.iloc[-1]['BusPUVolt'] = 0.9
+        self.env.bus_obs_data.iloc[-1]['BusPUVolt'] = 0.91
+
+        self.assertEqual(0.25, self.env._compute_reward())
+
+    def test_bad_move_wrong_direction(self):
+        self.env.bus_obs_data_prev.iloc[3]['BusPUVolt'] = 1.051
+        self.env.bus_obs_data.iloc[3]['BusPUVolt'] = 1.06
+
+        self.assertEqual(-0.25, self.env._compute_reward())
+
+    @unittest.skip("Don't worry about over/undershoot for now.")
+    def test_overshoot(self):
+        self.env.bus_obs_data_prev.iloc[4]['BusPUVolt'] = 0.9
+        self.env.bus_obs_data.iloc[4]['BusPUVolt'] = 1.06
+
+        # The agent decreased the distance from the band.
+        self.assertEqual(0.15, self.env._compute_reward())
+
+    def test_do_nothing(self):
+        self.env.bus_obs_data_prev.iloc[4]['BusPUVolt'] = 0.9
+        self.env.bus_obs_data.iloc[4]['BusPUVolt'] = 0.9
+
+        self.assertEqual(-0.1, self.env._compute_reward())
 
 
 # noinspection DuplicatedCode
