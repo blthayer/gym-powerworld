@@ -40,6 +40,7 @@ LOSS = 0.03
 LOW_V = 0.95
 HIGH_V = 1.05
 NOMINAL_V = 1.0
+V_TOL = 0.0001
 
 # Instead of writing code to manage English rules, just hard code plural
 # mappings.
@@ -50,9 +51,6 @@ PLURAL_MAP = {
     'branch': 'branches',
     'shunt': 'shunts'
 }
-
-# For determining if we're "in bounds," round first.
-ROUND_DECIMALS = 4
 
 # Lines which are allowed to be opened in the 14 bus case for some
 # environments.
@@ -362,7 +360,8 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                  log_buffer: int = 10000,
                  csv_logfile: str = 'log.csv',
                  truncate_voltages=False,
-                 scale_voltage_obs=False):
+                 scale_voltage_obs=False,
+                 vtol=V_TOL):
         """Initialize the environment. Pull data needed up front,
         create gen/loading cases, perform case checks, etc.
 
@@ -454,6 +453,12 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         :param scale_voltage_obs: Whether (True) or not (False) to
             scale bus voltage observations. Cannot be True if
             truncate_voltages is False.
+        :param vtol: Tolerance for comparing with low_v and high_v.
+            This helps avoid rounding error. The class instance's
+            low_v attribute will be set to low_v - vtol, and the
+            high_v attribute will be set to high_v + vtol. Then,
+            when checking v > low_v or v < high_v, we have some extra
+            tolerance built in.
         """
         ################################################################
         # Logging, seeding, SAW initialization, simple attributes
@@ -482,8 +487,8 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self.scenario_idx = 0
 
         # Track low and high v.
-        self.low_v = self.dtype(low_v)
-        self.high_v = self.dtype(high_v)
+        self.low_v = low_v - vtol
+        self.high_v = high_v + vtol
 
         # Logging.
         self.log_buffer = log_buffer
@@ -877,7 +882,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     def all_v_in_range(self):
         """True if all voltages are on interval
         [self.low_v, self.high_v], False otherwise."""
-        return self.bus_obs_data['BusPUVolt'].round(ROUND_DECIMALS).between(
+        return self.bus_obs_data['BusPUVolt'].between(
             self.low_v, self.high_v, inclusive=True).all()
 
     @property
@@ -2058,8 +2063,8 @@ def _compute_reward_volt_change(self: DiscreteVoltageControlEnvBase) ->\
 
     # Use helper function to get dictionary of masks.
     d = _get_voltage_masks(
-        v_prev=v_prev.to_numpy(dtype=self.dtype).round(ROUND_DECIMALS),
-        v_now=v_now.to_numpy(dtype=self.dtype).round(ROUND_DECIMALS),
+        v_prev=v_prev.to_numpy(dtype=self.dtype),
+        v_now=v_now.to_numpy(dtype=self.dtype),
         low_v=self.low_v,
         high_v=self.high_v)
 
@@ -2110,8 +2115,8 @@ def _compute_reward_volt_change_clipped(self: DiscreteVoltageControlEnvBase) \
 
     # Get aliases for the voltages to simplify. Round voltages to
     # get rid of annoying floating point errors.
-    v_prev = self.bus_pu_volt_arr_prev.round(ROUND_DECIMALS)
-    v_now = self.bus_pu_volt_arr.round(ROUND_DECIMALS)
+    v_prev = self.bus_pu_volt_arr_prev
+    v_now = self.bus_pu_volt_arr
 
     # Get dictionary of masks.
     d = _get_voltage_masks(v_prev=v_prev, v_now=v_now, low_v=self.low_v,
@@ -2868,13 +2873,11 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         "exists" symbols really should be interpreted as "if all" and
         "if any."
         """
-        # Get voltage data, round out to 6 decimal places. This prevents
-        # issues like 1.05000001 resulting in a violation, which is
-        # frankly silly.
-        v = self.bus_obs_data['BusPUVolt'].round(6)
+        # Get voltage data.
+        v = self.bus_obs_data['BusPUVolt']
 
         # Reward if all buses are in bounds.
-        if v.between(0.95, 1.05, inclusive=True).all():
+        if v.between(self.low_v, self.high_v, inclusive=True).all():
             reward = self.rewards['normal']
         # Penalize heavily if any voltages are in the "diverged" zone.
         elif (v <= 0.8).any() or (v >= 1.25).any():
