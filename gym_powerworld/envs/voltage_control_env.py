@@ -361,6 +361,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                  csv_logfile: str = 'log.csv',
                  truncate_voltages=False,
                  scale_voltage_obs=False,
+                 clipped_reward=False,
                  vtol=V_TOL):
         """Initialize the environment. Pull data needed up front,
         create gen/loading cases, perform case checks, etc.
@@ -453,6 +454,8 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         :param scale_voltage_obs: Whether (True) or not (False) to
             scale bus voltage observations. Cannot be True if
             truncate_voltages is False.
+        :param clipped_reward: Whether (True) or not (False) to use
+            the clipped reward scheme.
         :param vtol: Tolerance for comparing with low_v and high_v.
             This helps avoid rounding error. The class instance's
             low_v attribute will be set to low_v - vtol, and the
@@ -795,7 +798,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         self.action_count = 0
 
         ################################################################
-        # Set rewards.
+        # Set rewards and reward methods.
         ################################################################
         self.rewards = deepcopy(self.REWARDS)
         self._overwrite_rewards(rewards)
@@ -803,6 +806,19 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # Initialize attribute for tracking episode cumulative rewards.
         # It'll be reset in reset.
         self.cumulative_reward = 0
+
+        # Set _compute_reward and _compute_reward_failed_pf attributes
+        # depending on whether or not a clipped reward is desired. Note
+        # these reward schemes are markedly different, and will lead to
+        # different learning behavior.
+        if clipped_reward:
+            self._compute_reward = self._compute_reward_volt_change_clipped
+            self._compute_reward_failed_pf = \
+                self._compute_reward_failed_power_flow_clipped
+        else:
+            self._compute_reward = self._compute_reward_volt_change
+            self._compute_reward_failed_pf =\
+                self._compute_reward_failed_pf_volt_change
         ################################################################
         # Action/State logging
         ################################################################
@@ -1536,6 +1552,171 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         if self.log_idx == self.log_buffer:
             self._flush_log()
 
+    def _compute_reward_volt_change(self) -> float:
+        """Compute reward based on voltage movement.
+        """
+        # If the action taken was the no-op action, give a simple reward
+        # if all voltages are in bounds, and a simple penalty otherwise.
+        if self.last_action == self.no_op_action:
+            if self.all_v_in_range:
+                return self.rewards['no_op']
+            else:
+                return -self.rewards['no_op']
+
+        # First of all, any action gets us a negative reward. We'd like
+        # to avoid changing set points if possible.
+        reward = self.rewards['action']
+
+        # Get aliases for the voltages to simplify this gross method.
+        v_prev = self.bus_obs_data_prev['BusPUVolt']
+        v_now = self.bus_obs_data['BusPUVolt']
+
+        # Compute the difference in the distance to nominal voltage for
+        # all buses before and after the action. Multiply by 100 so that
+        # we reward change per 0.01 pu. Take the absolute value.
+        nom_delta_diff = \
+            ((v_prev - NOMINAL_V).abs() - (
+                        v_now - NOMINAL_V).abs()).abs() * 100
+
+        # Use helper function to get dictionary of masks.
+        d = _get_voltage_masks(
+            v_prev=v_prev.to_numpy(dtype=self.dtype),
+            v_now=v_now.to_numpy(dtype=self.dtype),
+            low_v=self.low_v,
+            high_v=self.high_v)
+
+        # Give reward for voltages that were out of bounds, but moved in
+        # the right direction, based on the change in distance from
+        # nominal voltage.
+        reward += (nom_delta_diff[d['out_right_d']]
+                   * self.rewards['v_delta']).sum()
+
+        # Similarly, give a penalty for voltages that were out of bounds,
+        # and moved in the wrong direction, based on the change in distance
+        # from nominal voltage.
+        reward -= (nom_delta_diff[d['out_wrong_d']]
+                   * self.rewards['v_delta']).sum()
+
+        # Give penalty for voltages that were in bounds, but moved out
+        # of bounds. Penalty should be based on how far away from the
+        # boundary (upper or lower) that they moved.
+        reward += ((v_now[d['in_out_low']] - LOW_V) / 0.01
+                   * self.rewards['v_delta']).sum()
+        reward += ((HIGH_V - v_now[d['in_out_high']])
+                   / 0.01 * self.rewards['v_delta']).sum()
+
+        # Give an extra penalty for moving buses out of bounds.
+        reward += d['in_out'].sum() * self.rewards['v_out_bounds']
+
+        # Give an extra reward for moving buses in bounds.
+        reward += d['out_in'].sum() * self.rewards['v_in_bounds']
+
+        # All done.
+        return reward
+
+    def _compute_reward_failed_pf_volt_change(self) -> float:
+        """Simply combine the fail and action rewards."""
+        return self.rewards['fail'] + self.rewards['action']
+
+    def _compute_reward_volt_change_clipped(self) -> float:
+        """Simplified voltage movement reward with a minimum at -1 and a
+        maximum at 1. The -1 reward won't be realized here, but rather in
+        the corresponding _compute_reward_failed_pf-like function.
+        """
+        # If the action taken was the no-op action, there's no reward or
+        # penalty.
+        if self.last_action == self.no_op_action:
+            return 0.0
+
+        # If all voltages are now in bounds, give the full reward of 1.
+        if self.all_v_in_range:
+            return 1.0
+
+        # Get aliases for the voltages to simplify. Round voltages to
+        # get rid of annoying floating point errors.
+        v_prev = self.bus_pu_volt_arr_prev
+        v_now = self.bus_pu_volt_arr
+
+        # Get dictionary of masks.
+        d = _get_voltage_masks(v_prev=v_prev, v_now=v_now, low_v=self.low_v,
+                               high_v=self.high_v)
+
+        # Compute number of buses that moved from out of the band to in
+        # the band, and vice versa.
+        out_in_sum = d['out_in'].sum()
+        in_out_sum = d['in_out'].sum()
+
+        # If more voltages moved in bounds, give a reward.
+        if (out_in_sum > in_out_sum) and (out_in_sum > 0):
+            net = out_in_sum - in_out_sum
+
+            if net > 1:
+                # 2nd highest possible reward.
+                return 0.75
+            else:
+                # 3rd highest possible reward.
+                return 0.5
+
+        # If more voltages moved out of bounds, give a penalty.
+        if (in_out_sum > out_in_sum) and (in_out_sum > 0):
+            net = in_out_sum - out_in_sum
+
+            if net > 1:
+                # Lowest possible reward aside from failed power flow.
+                return -0.75
+            else:
+                # Less severe penalty for just moving one bus.
+                return -0.5
+
+        # If we're here, no voltages moved in or out of bounds. In that
+        # case, we'll give lesser rewards/penalties depending on movement
+        # in the right/wrong direction.
+        right_d_sum = d['out_right_d'].sum()
+        wrong_d_sum = d['out_wrong_d'].sum()
+
+        # If more voltages moved in the right direction, give a reward.
+        if (right_d_sum > wrong_d_sum) and (right_d_sum > 0):
+            return 0.25
+
+        # If more voltages moved in the wrong direction, give a penalty.
+        if (wrong_d_sum > right_d_sum) and (wrong_d_sum > 0):
+            return -0.25
+
+        # TODO: If there were overshoots or undershoots, give a penalty if
+        #  we're now further from the band or a reward if we're now closer
+        #  to the band.
+
+        # If we're here, the given action was not very helpful or harmful.
+        # Give a small penalty for taking a "useless" action.
+        return -0.1
+
+    # noinspection PyMethodMayBeStatic
+    def _compute_reward_failed_power_flow_clipped(self) -> float:
+        """Clipped reward goes -1 to 1. So, causing a failure is the
+        biggest penalty.
+        """
+        return -1.0
+
+    def _compute_reward_gen_var_change(self) -> float:
+        """Compute a reward based on how generator var loading changes."""
+        # Give a positive reward for lessening generator var loading,
+        # and a negative reward for increasing it.
+        # TODO: This really should account for actual vars not just
+        #   percent loading.
+        var_delta = (self.gen_obs_data_prev['GenMVRPercent']
+                     - self.gen_obs_data['GenMVRPercent'])
+
+        return (var_delta * self.rewards['gen_var_delta']).sum()
+
+    def _compute_reward_volt_and_var_change(self) -> float:
+        """Composite reward that accounts for both bus voltage movement and
+        generator var loading movement.
+        """
+        reward = 0
+        reward += self._compute_reward_volt_change()
+        reward += self._compute_reward_gen_var_change()
+        return reward
+
     ####################################################################
     # Abstract methods
     ####################################################################
@@ -1606,12 +1787,6 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         """
 
     @abstractmethod
-    def _compute_reward(self):
-        """Subclasses should implement a _compute_reward method which
-        computes a reward for a given action.
-        """
-
-    @abstractmethod
     def _extra_reset_actions(self):
         """Subclasses should implement this method, which is called at
         the beginning of "reset".
@@ -1624,12 +1799,6 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         just return 0.
         """
 
-    @abstractmethod
-    def _compute_reward_failed_pf(self):
-        """If the power flow fails to solve (or goes into exceptionally
-        low voltages where we cannot trust the solution anymore),
-        compute the reward (penalty).
-        """
     @abstractmethod
     def _get_num_obs_and_space(self) -> Tuple[int, spaces.Space]:
         """Return the number of observations, and an observation space.
@@ -2035,151 +2204,6 @@ def _compute_branches_from_lines_to_open(self):
                              size=self.num_scenarios)
 
 
-def _compute_reward_volt_change(self: DiscreteVoltageControlEnvBase) ->\
-        float:
-    """Compute reward based on voltage movement.
-    """
-    # If the action taken was the no-op action, give a simple reward
-    # if all voltages are in bounds, and a simple penalty otherwise.
-    if self.last_action == self.no_op_action:
-        if self.all_v_in_range:
-            return self.rewards['no_op']
-        else:
-            return -self.rewards['no_op']
-
-    # First of all, any action gets us a negative reward. We'd like
-    # to avoid changing set points if possible.
-    reward = self.rewards['action']
-
-    # Get aliases for the voltages to simplify this gross method.
-    v_prev = self.bus_obs_data_prev['BusPUVolt']
-    v_now = self.bus_obs_data['BusPUVolt']
-
-    # Compute the difference in the distance to nominal voltage for
-    # all buses before and after the action. Multiply by 100 so that
-    # we reward change per 0.01 pu. Take the absolute value.
-    nom_delta_diff = \
-        ((v_prev - NOMINAL_V).abs() - (v_now - NOMINAL_V).abs()).abs() * 100
-
-    # Use helper function to get dictionary of masks.
-    d = _get_voltage_masks(
-        v_prev=v_prev.to_numpy(dtype=self.dtype),
-        v_now=v_now.to_numpy(dtype=self.dtype),
-        low_v=self.low_v,
-        high_v=self.high_v)
-
-    # Give reward for voltages that were out of bounds, but moved in
-    # the right direction, based on the change in distance from
-    # nominal voltage.
-    reward += (nom_delta_diff[d['out_right_d']]
-               * self.rewards['v_delta']).sum()
-
-    # Similarly, give a penalty for voltages that were out of bounds,
-    # and moved in the wrong direction, based on the change in distance
-    # from nominal voltage.
-    reward -= (nom_delta_diff[d['out_wrong_d']]
-               * self.rewards['v_delta']).sum()
-
-    # Give penalty for voltages that were in bounds, but moved out
-    # of bounds. Penalty should be based on how far away from the
-    # boundary (upper or lower) that they moved.
-    reward += ((v_now[d['in_out_low']] - LOW_V) / 0.01
-               * self.rewards['v_delta']).sum()
-    reward += ((HIGH_V - v_now[d['in_out_high']])
-               / 0.01 * self.rewards['v_delta']).sum()
-
-    # Give an extra penalty for moving buses out of bounds.
-    reward += d['in_out'].sum() * self.rewards['v_out_bounds']
-
-    # Give an extra reward for moving buses in bounds.
-    reward += d['out_in'].sum() * self.rewards['v_in_bounds']
-
-    # All done.
-    return reward
-
-
-def _compute_reward_volt_change_clipped(self: DiscreteVoltageControlEnvBase) \
-        -> float:
-    """Simplified voltage movement reward with a minimum at -1 and a
-    maximum at 1. The -1 reward won't be realized here, but rather in
-    the corresponding _compute_reward_failed_pf-like function.
-    """
-    # If the action taken was the no-op action, there's no reward or
-    # penalty.
-    if self.last_action == self.no_op_action:
-        return 0.0
-
-    # If all voltages are now in bounds, give the full reward of 1.
-    if self.all_v_in_range:
-        return 1.0
-
-    # Get aliases for the voltages to simplify. Round voltages to
-    # get rid of annoying floating point errors.
-    v_prev = self.bus_pu_volt_arr_prev
-    v_now = self.bus_pu_volt_arr
-
-    # Get dictionary of masks.
-    d = _get_voltage_masks(v_prev=v_prev, v_now=v_now, low_v=self.low_v,
-                           high_v=self.high_v)
-
-    # Compute number of buses that moved from out of the band to in
-    # the band, and vice versa.
-    out_in_sum = d['out_in'].sum()
-    in_out_sum = d['in_out'].sum()
-
-    # If more voltages moved in bounds, give a reward.
-    if (out_in_sum > in_out_sum) and (out_in_sum > 0):
-        net = out_in_sum - in_out_sum
-
-        if net > 1:
-            # 2nd highest possible reward.
-            return 0.75
-        else:
-            # 3rd highest possible reward.
-            return 0.5
-
-    # If more voltages moved out of bounds, give a penalty.
-    if (in_out_sum > out_in_sum) and (in_out_sum > 0):
-        net = in_out_sum - out_in_sum
-
-        if net > 1:
-            # Lowest possible reward aside from failed power flow.
-            return -0.75
-        else:
-            # Less severe penalty for just moving one bus.
-            return -0.5
-
-    # If we're here, no voltages moved in or out of bounds. In that
-    # case, we'll give lesser rewards/penalties depending on movement
-    # in the right/wrong direction.
-    right_d_sum = d['out_right_d'].sum()
-    wrong_d_sum = d['out_wrong_d'].sum()
-
-    # If more voltages moved in the right direction, give a reward.
-    if (right_d_sum > wrong_d_sum) and (right_d_sum > 0):
-        return 0.25
-
-    # If more voltages moved in the wrong direction, give a penalty.
-    if (wrong_d_sum > right_d_sum) and (wrong_d_sum > 0):
-        return -0.25
-
-    # TODO: If there were overshoots or undershoots, give a penalty if
-    #  we're now further from the band or a reward if we're now closer
-    #  to the band.
-
-    # If we're here, the given action was not very helpful or harmful.
-    # Give a small penalty for taking a "useless" action.
-    return -0.1
-
-
-def _compute_reward_failed_power_flow_clipped(
-        self: DiscreteVoltageControlEnvBase) -> float:
-    """Clipped reward goes -1 to 1. So, causing a failure is the
-    biggest penalty.
-    """
-    return -1.0
-
-
 def _get_voltage_masks(v_prev, v_now, low_v, high_v):
     # Get masks for bus voltages which are too high or too low for
     # both the previous (pre-action) data frame and the current
@@ -2234,30 +2258,6 @@ def _get_voltage_masks(v_prev, v_now, low_v, high_v):
     }
 
     return out
-
-
-def _compute_reward_gen_var_change(self: DiscreteVoltageControlEnvBase) \
-        -> float:
-    """Compute a reward based on how generator var loading changes."""
-    # Give a positive reward for lessening generator var loading,
-    # and a negative reward for increasing it.
-    # TODO: This really should account for actual vars not just
-    #   percent loading.
-    var_delta = (self.gen_obs_data_prev['GenMVRPercent']
-                 - self.gen_obs_data['GenMVRPercent'])
-
-    return (var_delta * self.rewards['gen_var_delta']).sum()
-
-
-def _compute_reward_volt_and_var_change(self: DiscreteVoltageControlEnvBase) \
-        -> float:
-    """Composite reward that accounts for both bus voltage movement and
-    generator var loading movement.
-    """
-    reward = 0
-    reward += _compute_reward_volt_change(self)
-    reward += _compute_reward_gen_var_change(self)
-    return reward
 
 
 def _set_branches_for_scenario_from_lines_to_open(
@@ -2493,7 +2493,6 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     # Use helper functions to simplify the class definition.
     _compute_loading = _compute_loading_robust
     _compute_generation = _compute_generation_and_dispatch
-    _compute_reward = _compute_reward_volt_and_var_change
     _compute_gen_v_set_points = _compute_gen_v_set_points_draw
 
     def _compute_branches(self):
@@ -2699,10 +2698,6 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         """
         return 0
 
-    def _compute_reward_failed_pf(self):
-        """Simply combine the fail and action rewards."""
-        return self.rewards['fail'] + self.rewards['action']
-
     def _compute_shunts(self):
         """Set up shunts."""
         if self.shunt_init_data is None:
@@ -2825,6 +2820,13 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
             ))
 
         ################################################################
+        # Override reward methods.
+        ################################################################
+        self._compute_reward = self._compute_reward_gridmind
+        self._compute_reward_failed_pf = \
+            self._compute_reward_failed_pf_gridmind
+
+        ################################################################
         # Misc.
         ################################################################
 
@@ -2864,7 +2866,7 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         """
         return None
 
-    def _compute_reward(self):
+    def _compute_reward_gridmind(self):
         """The reward structure for GridMind is pretty primitive -
         rewards for getting all buses in the normal zone, penalties if
         any buses are outside that zone. It would seem the notation
@@ -2910,7 +2912,7 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
         """
         return self.cumulative_reward / self.action_count
 
-    def _compute_reward_failed_pf(self):
+    def _compute_reward_failed_pf_gridmind(self):
         """After consulting with a co-author on the paper (Jiajun Duan)
         I've confirmed that if the power flow fails to converge, they
         simply give a single instance of the "diverged" penalty.
@@ -2959,9 +2961,6 @@ class DiscreteVoltageControlGenAndShuntNoContingenciesEnv(
         """No contingencies, do nothing."""
         return None
 
-    # Voltage movement only reward.
-    _compute_reward = _compute_reward_volt_change
-
     def _get_observation(self) -> np.ndarray:
         """Concatenate bus voltages, generator states, and shunt states.
         """
@@ -3007,9 +3006,6 @@ class DiscreteVoltageControlSimpleEnv(DiscreteVoltageControlEnv):
     _get_observation = _get_observation_bus_pu_only
     _get_observation_failed_pf = _get_observation_failed_pf_volt_only
     _get_num_obs_and_space = _get_num_obs_and_space_v_only
-
-    # Use only bus voltage movement in the rewards.
-    _compute_reward = _compute_reward_volt_change
 
     # Draw branches to open from LINES_TO_OPEN, rather than all
     # available branches.
@@ -3161,13 +3157,6 @@ class DiscreteVoltageControlBranchAndGenState14BusEnv(
         if not self.scale_voltage_obs:
             high[0:self.num_buses] = 2
         return n, spaces.Box(low=low, high=high, dtype=self.dtype)
-
-
-class DiscreteVoltageControlBranchAndGenStateClippedReward14BusEnv(
-        DiscreteVoltageControlBranchAndGenState14BusEnv):
-    """Same as parent class, but uses the clipped rewards."""
-    _compute_reward = _compute_reward_volt_change_clipped
-    _compute_reward_failed_pf = _compute_reward_failed_power_flow_clipped
 
 
 class Error(Exception):

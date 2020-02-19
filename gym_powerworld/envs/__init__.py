@@ -4,5 +4,4 @@ from gym_powerworld.envs.voltage_control_env import DiscreteVoltageControlEnv,\
     DiscreteVoltageControlGenState14BusEnv, \
     DiscreteVoltageControlBranchState14BusEnv, \
     DiscreteVoltageControlBranchAndGenState14BusEnv, \
-    DiscreteVoltageControlGenAndShuntNoContingenciesEnv, \
-    DiscreteVoltageControlBranchAndGenStateClippedReward14BusEnv
+    DiscreteVoltageControlGenAndShuntNoContingenciesEnv

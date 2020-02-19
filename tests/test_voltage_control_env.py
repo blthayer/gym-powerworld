@@ -2658,7 +2658,7 @@ class DiscreteVoltageControlBranchAndGenStateClippedReward14BusEnvTestCase(
             pass
 
         cls.env = \
-            voltage_control_env.DiscreteVoltageControlBranchAndGenStateClippedReward14BusEnv(
+            voltage_control_env.DiscreteVoltageControlEnv(
                 pwb_path=PWB_14, num_scenarios=cls.num_scenarios,
                 max_load_factor=cls.max_load_factor,
                 min_load_factor=cls.min_load_factor,
@@ -2673,7 +2673,8 @@ class DiscreteVoltageControlBranchAndGenStateClippedReward14BusEnvTestCase(
                 log_buffer=cls.log_buffer,
                 csv_logfile=cls.csv_logfile,
                 truncate_voltages=True,
-                scale_voltage_obs=True
+                scale_voltage_obs=True,
+                clipped_reward=True
             )
 
     # noinspection PyUnresolvedReferences
