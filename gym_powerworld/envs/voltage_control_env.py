@@ -1080,6 +1080,8 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
 
             if done and self.all_v_in_range:
                 info['is_success'] = True
+            elif done:
+                info['is_success'] = False
 
         # Update the cumulative reward for this episode.
         self.cumulative_reward += reward
