@@ -47,3 +47,9 @@ register(
     entry_point=
         'gym_powerworld.envs:DiscreteVoltageControlGenAndShuntNoContingenciesEnv'
 )
+
+register(
+    id='powerworld-discrete-env-gen-branch-shunt-v0',
+    entry_point=
+        'gym_powerworld.envs:DiscreteVoltageControlGensBranchesShuntsEnv'
+)

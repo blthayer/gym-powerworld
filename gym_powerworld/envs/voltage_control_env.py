@@ -2998,6 +2998,55 @@ class DiscreteVoltageControlGenAndShuntNoContingenciesEnv(
         return n, spaces.Box(low=low, high=high, dtype=self.dtype)
 
 
+class DiscreteVoltageControlGensBranchesShuntsEnv(DiscreteVoltageControlEnv):
+    """Environment with single line contingencies.
+
+    Actions: Generator set point, toggle shunt
+    Observations: Bus voltages, generator states, shunt states, and
+        branch states
+    Reward: Voltage movement only
+    """
+    # Get line states during observation.
+    BRANCH_OBS_FIELDS = ['LineStatus']
+
+    def _get_observation(self) -> np.ndarray:
+        """Concatenate bus voltages, generator states, shunt states, and
+        branch states.
+        """
+        # Note the voltage will only be scaled if self.scale_voltage_obs
+        # is True. Otherwise, it'll be raw voltages.
+        return np.concatenate(
+            (self.bus_pu_volt_arr_scaled, self.gen_status_arr,
+             self.shunt_status_arr, self.branch_status_arr)
+        )
+
+    def _get_observation_failed_pf(self):
+        """Concatenate bus voltages (0 due to failed power flow),
+        generator states, shunt states, and branch states.
+        """
+        return np.concatenate(
+            (_get_observation_failed_pf_volt_only(self),
+             self.gen_status_arr, self.shunt_status_arr,
+             self.branch_status_arr)
+        )
+
+    def _get_num_obs_and_space(self) -> Tuple[int, spaces.Box]:
+        """Number of observations is total of number of buses, gens,
+        shunts, and branches.
+        """
+        # Observations consist of bus per unit voltage, generator
+        # states and shunt states.
+        n = self.num_buses + self.num_gens + self.num_shunts \
+            + self.num_branches
+        # Low is 0 for all quantities.
+        low = np.zeros(n, dtype=self.dtype)
+        # High will be 2 for bus voltages, 1 for everything else.
+        high = np.ones(n, dtype=self.dtype)
+        if not self.scale_voltage_obs:
+            high[0:self.num_buses] = 2
+        return n, spaces.Box(low=low, high=high, dtype=self.dtype)
+
+
 class DiscreteVoltageControlSimpleEnv(DiscreteVoltageControlEnv):
     """Simplified version of the DiscreteVoltageControlEnv will use
     only bus magnitudes for observations, and will only consider voltage
