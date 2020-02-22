@@ -2490,8 +2490,8 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         # Misc.
         ################################################################
         # Set the action cap to be double the number of generators.
-        # TODO: Include other controllable assets, e.g. shunts/taps
-        self._action_cap = 2 * self.num_gens
+        # TODO: Include other controllable assets, e.g. taps
+        self._action_cap = 2 * self.num_gens + 2 * self.num_shunts
 
         # No-op action will be 0.
         self.no_op_action = 0
