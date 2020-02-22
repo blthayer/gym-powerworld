@@ -319,7 +319,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
 
     @property
     @abstractmethod
-    def action_cap(self):
+    def action_cap(self) -> int:
         """Subclasses should define an action_cap."""
         pass
 
@@ -331,6 +331,15 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         disable line opening. Each sub-list should have three elements:
         from bus, to bus, and line circuit ID. These correspond to the
         PowerWorld legacy variables BusNum, BusNum:1, LineCircuit
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def CONTINGENCIES(self) -> bool:
+        """Subclasses should define a CONTINGENCIES flag indicating
+        whether or not contingencies are included in scenario
+        initialization.
         """
         pass
 
@@ -2338,6 +2347,7 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
     BRANCH_INIT_FIELDS = []
     BRANCH_OBS_FIELDS = []
     BRANCH_RESET_FIELDS = []
+    CONTINGENCIES = False
 
     # By default, do not open any lines.
     LINES_TO_OPEN = None
@@ -2778,6 +2788,7 @@ class GridMindEnv(DiscreteVoltageControlEnvBase):
     BRANCH_INIT_FIELDS = []
     BRANCH_OBS_FIELDS = ['LineMW', 'LineMVR']
     BRANCH_RESET_FIELDS = []
+    CONTINGENCIES = False
 
     # By default, do not open any lines.
     LINES_TO_OPEN = None
@@ -2931,6 +2942,7 @@ class GridMindContingenciesEnv(GridMindEnv):
     is hard-coded to work only with the IEEE 14 bus case."""
     # Get line status.
     BRANCH_INIT_FIELDS = ['LineStatus']
+    CONTINGENCIES = True
 
     # In the paper, the allowed lines are 1-5, 2-3, 4-5, and 7-9.
     LINES_TO_OPEN = LINES_TO_OPEN_14
@@ -2955,6 +2967,8 @@ class DiscreteVoltageControlGenAndShuntNoContingenciesEnv(
     Reward: Voltage movement only
     """
     # No contingencies.
+    CONTINGENCIES = False
+
     def _compute_branches(self):
         """No contingencies, do nothing."""
         return None
@@ -3008,6 +3022,7 @@ class DiscreteVoltageControlGensBranchesShuntsEnv(DiscreteVoltageControlEnv):
     """
     # Get line states during observation.
     BRANCH_OBS_FIELDS = ['LineStatus']
+    CONTINGENCIES = True
 
     def _get_observation(self) -> np.ndarray:
         """Concatenate bus voltages, generator states, shunt states, and
@@ -3073,6 +3088,7 @@ class DiscreteVoltageControlSimple14BusEnv(DiscreteVoltageControlSimpleEnv):
 
     # In the paper, the allowed lines are 1-5, 2-3, 4-5, and 7-9.
     LINES_TO_OPEN = LINES_TO_OPEN_14
+    CONTINGENCIES = True
 
 
 class DiscreteVoltageControlGenState14BusEnv(
