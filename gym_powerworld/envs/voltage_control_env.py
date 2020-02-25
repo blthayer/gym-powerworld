@@ -12,6 +12,7 @@ import os
 import matplotlib.pyplot as plt
 from matplotlib.image import AxesImage
 from PIL import Image
+import pickle
 
 # Get full path to this directory.
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -76,6 +77,42 @@ MAX_V_SCALED = 1
 # https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.MinMaxScaler.html
 V_SCALER = (MAX_V_SCALED - MIN_V_SCALED) / (MAX_V - MIN_V)
 V_ADD_TERM = MIN_V_SCALED - MIN_V * V_SCALER
+
+
+def save_env(env, file):
+    """Pickle the given env and save to the given file. The saw object
+    will be set to None for saving, and restored after saving is
+    complete.
+    """
+    saw = env.saw
+    env.saw = None
+    try:
+        with open(file, 'wb') as f:
+            pickle.dump(env, f)
+    finally:
+        env.saw = saw
+
+    return None
+
+
+def load_env(file, pwb_path=None):
+    """Load an environment from file. If given a pwb_path, initialize
+    the environment's SAW object from the given path.
+    """
+    with open(file, 'rb') as f:
+        env = pickle.load(f)
+
+    if pwb_path is not None:
+        p = pwb_path
+    else:
+        p = env.pwb_path
+
+    env.saw = SAW(FileName=p, early_bind=True)
+
+    # Prep the PowerWorld case.
+    env.prep_case()
+
+    return env
 
 
 def _scale_voltages(arr_in: np.ndarray) -> np.ndarray:
@@ -484,6 +521,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
 
         # Initialize a SimAuto wrapper. Use early binding since it's
         # faster.
+        self.pwb_path = pwb_path
         self.saw = SAW(pwb_path, early_bind=True)
         self.log.debug('PowerWorld case loaded.')
 
@@ -962,6 +1000,12 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
     ####################################################################
     # Public methods
     ####################################################################
+    def prep_case(self):
+        """Perform updates to the PowerWorld case as part of
+        initialization. This method really only ever needs called during
+        initialization and after loading a pickled environment.
+        """
+        raise NotImplementedError()
 
     def render(self, mode='human'):
         """The rendering here is quite primitive due to limitations in

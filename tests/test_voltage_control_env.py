@@ -4,7 +4,8 @@ from gym_powerworld.envs import voltage_control_env
 # noinspection PyProtectedMember
 from gym_powerworld.envs.voltage_control_env import LOSS, \
     MinLoadBelowMinGenError, MaxLoadAboveMaxGenError, OutOfScenariosError, \
-    MIN_V, MAX_V, MIN_V_SCALED, MAX_V_SCALED, _scale_voltages
+    MIN_V, MAX_V, MIN_V_SCALED, MAX_V_SCALED, _scale_voltages, \
+    save_env, load_env
 import os
 import pandas as pd
 import numpy as np
@@ -1714,6 +1715,35 @@ class GridMindControlEnv14BusMiscTestCase(unittest.TestCase):
         obs = self.env._get_observation_failed_pf()
         self.assertTrue((obs == 0.0).all())
         self.assertEqual(obs.shape, (self.env.num_buses,))
+
+    def test_save_and_load(self):
+        """Test that save_env and load_env work properly."""
+        f = 'tmp.pkl'
+        try:
+            # Save to file.
+            save_env(self.env, f)
+            # Ensure the SAW object has been restored.
+            self.assertIsNotNone(self.env.saw)
+            # Load.
+            env = load_env(file=f)
+        finally:
+            os.remove(f)
+
+        # Ensure attributes match up.
+        d1 = dir(self.env)
+        d2 = dir(env)
+
+        self.assertListEqual(d1, d2)
+
+        # We could loop and test all the attributes, but that would be
+        # pretty silly considering the pure simplicity of the methods
+        # and the crazy stacked if/else that would be required to
+        # determine how to compare each attribute for equality.
+        #
+        # However, note that we need to ensure all the little case
+        # tweaks were properly carried out.
+        self.assertTrue(
+            False, 'Ensure the PowerWorld case has been properly tweaked.')
 
 
 # noinspection DuplicatedCode
