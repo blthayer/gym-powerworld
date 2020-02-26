@@ -955,6 +955,13 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         return obs.groupby('BusNum')['GenStatusBool'].any().to_numpy()
 
     @property
+    def gen_buses(self) -> pd.Int64Index:
+        """Get all buses which have generators. The return will be an
+        Int64Index. Transform it as needed after you've gotten it.
+        """
+        return self.gen_init_data_mi.index.get_level_values('BusNum')
+
+    @property
     def branch_status_arr(self) -> np.ndarray:
         """Get the branch (line) states (Open/Closed) as a numeric
         vector. Truthy values correspond to Closed, falsey values
