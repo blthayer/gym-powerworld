@@ -949,7 +949,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         indicate there's a generator which is on at the bus, False
         will indicate no generator at the bus is on.
         """
-        obs = self.gen_obs_data[['BusNum', 'GenStatus']]
+        obs = self.gen_obs_data.loc[:, ['BusNum', 'GenStatus']]
         obs['GenStatusBool'] = self.gen_obs_data['GenStatus'].map(
             STATE_MAP_INV)
         return obs.groupby('BusNum')['GenStatusBool'].any().to_numpy()
