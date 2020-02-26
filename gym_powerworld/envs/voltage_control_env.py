@@ -56,7 +56,7 @@ PLURAL_MAP = {
 # environments.
 LINES_TO_OPEN_14 = ((1, 5, '1'), (2, 3, '1'), (4, 5, '1'), (7, 9, '1'))
 
-# Map for open/closed states.
+# Maps for open/closed states.
 STATE_MAP = {
     1: 'Closed',
     0: 'Open',
@@ -65,6 +65,7 @@ STATE_MAP = {
     1.0: 'Closed',
     0.0: 'Open'
 }
+STATE_MAP_INV = {'Closed': True, 'Open': False}
 
 # Some environments may reject scenarios with a certain voltage range.
 MIN_V = 0.7
@@ -941,6 +942,17 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         """
         return (self.gen_obs_data['GenStatus'] == 'Closed').to_numpy(
             dtype=self.dtype)
+
+    @property
+    def gen_bus_status_arr(self) -> np.ndarray:
+        """Get boolean vector for buses with generators. True will
+        indicate there's a generator which is on at the bus, False
+        will indicate no generator at the bus is on.
+        """
+        obs = self.gen_obs_data[['BusNum', 'GenStatus']]
+        obs['GenStatusBool'] = self.gen_obs_data['GenStatus'].map(
+            STATE_MAP_INV)
+        return obs.groupby('BusNum')['GenStatusBool'].any().to_numpy()
 
     @property
     def branch_status_arr(self) -> np.ndarray:

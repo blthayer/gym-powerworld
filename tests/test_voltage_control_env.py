@@ -1715,6 +1715,21 @@ class GridMindControlEnv14BusMiscTestCase(unittest.TestCase):
         self.assertTrue((obs == 0.0).all())
         self.assertEqual(obs.shape, (self.env.num_buses,))
 
+    def test_gen_bus_status_arr(self):
+        """Test the gen_bus_status_arr property."""
+        df = pd.DataFrame({'BusNum': [1, 1, 3, 7, 7, 9, 11, 11],
+                           'GenStatus': ['Open', 'Closed', 'Closed',
+                                         'Open', 'Open', 'Open',
+                                         'Closed', 'Closed']})
+        with patch.object(self.env, 'gen_obs_data', new=df):
+            vec = self.env.gen_bus_status_arr
+
+        np.testing.assert_array_equal(
+            # Bus 1, 3, 7, 9, 11
+            np.array([True, True, False, False, True]),
+            vec
+        )
+
 
 # noinspection DuplicatedCode
 class GridMindControlEnv14BusCondensersTestCase(unittest.TestCase):
