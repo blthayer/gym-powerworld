@@ -37,11 +37,11 @@ setup(name='gym_powerworld',
                 'voltage control electric power system'),
       python_requires='>=3.5',
       install_requires=[
-            'gym',
-            'numpy',
-            'pandas >= 0.24',
-            'esa',
-            'pillow',
-            'matplotlib'
+            'gym==0.15.4',
+            'numpy==1.18.1',
+            'pandas==1.0.1',
+            'esa==0.6.2',
+            'pillow==7.0.0',
+            'matplotlib==3.1.2'
       ]
 )
