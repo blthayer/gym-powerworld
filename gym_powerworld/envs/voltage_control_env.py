@@ -372,7 +372,8 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                  truncate_voltages=False,
                  scale_voltage_obs=False,
                  clipped_reward=False,
-                 vtol=V_TOL):
+                 vtol=V_TOL,
+                 no_op_flag=False):
         """Initialize the environment. Pull data needed up front,
         create gen/loading cases, perform case checks, etc.
 
@@ -472,6 +473,9 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             high_v attribute will be set to high_v + vtol. Then,
             when checking v > low_v or v < high_v, we have some extra
             tolerance built in.
+        :param no_op_flag: If True, when an agent takes the "no-op"
+            action, the episode will be terminated and the agent will
+            receive a reward of 0.
         """
         ################################################################
         # Logging, seeding, SAW initialization, simple attributes
@@ -524,6 +528,10 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
 
         # Track the last action taken.
         self.last_action = None
+
+        # Track the no op flag
+        self.no_op_flag = no_op_flag
+
         ################################################################
         # Rendering related stuff
         ################################################################
@@ -1141,10 +1149,18 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
             reward = self._compute_reward()
             done = self._check_done()
 
+            # Only successful if the episode is done and all
+            # voltages are in range.
             if done and self.all_v_in_range:
                 info['is_success'] = True
-            elif done:
+            else:
                 info['is_success'] = False
+
+        # If the no op flag is true, override reward and done. No
+        # this is not efficient, and that's okay.
+        if self.no_op_flag:
+            reward = 0.0
+            done = True
 
         # Update the cumulative reward for this episode.
         self.cumulative_reward += reward

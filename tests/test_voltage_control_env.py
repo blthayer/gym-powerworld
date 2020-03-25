@@ -1140,6 +1140,18 @@ class DiscreteVoltageControlEnv14BusStepTestCase(unittest.TestCase):
         p1.assert_called_once()
         self.assertEqual(p2.call_count, 0)
 
+    def test_no_op_with_no_op_flag(self):
+        """If the no_op_flag is True, the episode should end with no
+        reward if the no-op action is taken.
+        """
+        with patch.object(self.env, 'no_op_flag', new=True):
+            obs, reward, done, info = self.env.step(self.env.no_op_action)
+
+        self.assertEqual(obs.shape, self.env.observation_space.shape)
+        self.assertEqual(reward, 0)
+        self.assertTrue(done)
+        self.assertDictEqual(info, {'is_success': False})
+
 
 # noinspection DuplicatedCode
 class DiscreteVoltageControlEnv14BusComputeRewardTestCase(unittest.TestCase):
