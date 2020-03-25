@@ -686,6 +686,14 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
                 'other than their own. This can be fixed without a horrendous '
                 'amount of effort.'
             )
+
+        # Get an array that tells us if a generator has a 0 limit for
+        # either its var min or max. A "truthy" element means the
+        # generator has a 0 limit (either min or max), while "falsey"
+        # means the generator has neither a 0 max nor min.
+        self.gen_var_lim_zero_arr = (
+                (self.gen_init_data['GenMVRMax'].to_numpy() == 0.0)
+                | (self.gen_init_data['GenMVRMin'].to_numpy() == 0.0))
         ################################################################
         # Load fields and data
         ################################################################
@@ -952,7 +960,31 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         obs = self.gen_obs_data.loc[:, ['BusNum', 'GenStatus']]
         obs['GenStatusBool'] = self.gen_obs_data['GenStatus'].map(
             STATE_MAP_INV)
-        return obs.groupby('BusNum')['GenStatusBool'].any().to_numpy()
+        return obs.groupby('BusNum')['GenStatusBool'].any().to_numpy(
+            dtype=self.dtype
+        )
+
+    @property
+    def gen_var_frac_arr(self) -> np.ndarray:
+        """Get vector of generator var fractions on interval [0, 1].
+        Note that information about whether the generator is absorbing
+        or supplying vars will be lost. See GenMVRPercentTestCase for
+        some "proofs" related to PowerWorld's handling of GenMVRPercent.
+        """
+        # Start by simply pulling absolute value of GenMVRPercent / 100.
+        frac = (self.gen_obs_data['GenMVRPercent'].abs() / 100).to_numpy(
+            dtype=self.dtype
+        )
+
+        # The swing bus can exceed 100%, so clip.
+        frac = np.minimum(frac, 1.0)
+
+        # If a generator is on but has a limit of 0, the GenMVRPercent
+        # will come back at 0. Those generators will be changed to 1.0
+        # indicating they're maxed out.
+        frac = np.where((frac == 0.0) & self.gen_var_lim_zero_arr, 1.0, frac)
+
+        return frac
 
     @property
     def gen_buses(self) -> pd.Int64Index:
@@ -2679,7 +2711,12 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
         return NotImplementedError()
 
     def _get_observation(self) -> np.ndarray:
-        """Helper to return an observation. For the given simulation,
+        """NOTE: In my experiments, I never actually use this specific
+        method. This method was written with some initial ideas in mind,
+        but in reality, subclasses overwrite this method and use much
+        simpler observations.
+
+        Helper to return an observation. For the given simulation,
         the power flow should already have been solved.
         """
         # Add a column to load_data for power factor lead/lag
@@ -2698,6 +2735,8 @@ class DiscreteVoltageControlEnv(DiscreteVoltageControlEnvBase):
             (self.gen_obs_data['GenMW'] / self.gen_obs_data['GenMVA']).fillna(
                 1).to_numpy(dtype=self.dtype),
             # Generator var loading.
+            # NOTE/TODO: This misses all sorts of edge cases.
+            # See the GenMVRPercentTestCase for more details.
             self.gen_obs_data['GenMVRPercent'].to_numpy(
                 dtype=self.dtype) / 100,
             # Load MW consumption divided by maximum MW loading.

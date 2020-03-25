@@ -517,6 +517,16 @@ class DiscreteVoltageControlEnv14BusTestCase(unittest.TestCase):
     def test_last_action(self):
         self.assertIsNone(self.env.last_action)
 
+    def test_gen_var_lim_zero_arr(self):
+        """Ensure the gen_var_lim_zero_arr is as expected."""
+        # The swing bus (which is listed first) and generator at bus 3
+        # should have 0 limits.
+        mask = np.ones(self.env.gen_var_lim_zero_arr.shape[0], dtype=bool)
+        mask[0] = False
+        mask[2] = False
+        self.assertTrue(self.env.gen_var_lim_zero_arr[~mask].all())
+        self.assertFalse(self.env.gen_var_lim_zero_arr[mask].any())
+
 
 # noinspection DuplicatedCode
 class DiscreteVoltageControlEnv14BusLimitsTestCase(unittest.TestCase):
@@ -904,6 +914,50 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
         np.testing.assert_array_equal(
             expected, self.env.scenario_init_success[0:4]
         )
+
+    def test_gen_var_frac(self):
+        """Ensure the gen_var_frac comes back as it should. This is not
+        a comprehensive test.
+        """
+        # Call reset to ensure we have observation data.
+        self.env.reset()
+
+        # Grab array for short-hand.
+        a = self.env.gen_var_frac_arr
+
+        # Check shape.
+        self.assertEqual((self.env.num_gens,), a.shape)
+
+        # All values should be in range [0, 1].
+        self.assertTrue(((a >= 0.0) & (a <= 1.0)).all())
+
+    def test_gen_var_frac_addl(self):
+        """Additional testing for gen_var_frac."""
+        # Call reset to get an observation.
+        self.env.reset()
+
+        # Get a copy of the observation data (for patching)
+        obs = self.env.gen_obs_data.copy(deep=True)
+
+        # Set the vars at 0 for the generator at bus 3, since it has a
+        # 0 limit.
+        obs.loc[2, 'GenMVRPercent'] = 0.0
+
+        # Put the swing bus percentage above 100.
+        obs.loc[0, 'GenMVRPercent'] = 101.00
+
+        # Patch the observation and get the array.
+        with patch.object(self.env, 'gen_obs_data', new=obs):
+            a = self.env.gen_var_frac_arr
+
+        # All values should be in range [0, 1].
+        self.assertTrue(((a >= 0.0) & (a <= 1.0)).all())
+
+        # Generator at bus 3 should read 1.0
+        self.assertEqual(a[2], 1.0)
+
+        # Swing bus should read 1.0
+        self.assertEqual(a[0], 1.0)
 
 
 # noinspection DuplicatedCode
@@ -3522,6 +3576,150 @@ class DiscreteVoltageControlEnvVoltBoundsTestCase(unittest.TestCase):
             np.ones(self.env.num_buses, dtype=self.env.dtype),
             self.env.observation_space.high[0:self.env.num_buses]
         )
+
+
+class GenMVRPercentTestCase(unittest.TestCase):
+    """Test case for the generator attribute 'GenMVRPercent.' This shows
+    several properties:
+    - PowerWorld maps 0/0 to 0. In other words, if the generator is
+        at its minimum and that minimum is 0, the GenMVRPercent is 0.
+    - If a generator is off, it's GenMVRPercent is 0.
+    - If a generator is absorbing vars (GenMVR < 0), the GenMVRPercent
+        is negative.
+    - Particularly for the swing bus, the GenMVRPercent can exceed
+        100% or go below -100%.
+    - GenMVRPercent values do indeed come back as percentage values,
+        i.e. [-100, 100] (typically, excluding swing exception above)
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        """Initialize SAW instance, tweak var limits for generator at
+        bus one, pull data, save state.
+        """
+        # Get a SAW instance.
+        cls.saw = SAW(FileName=PWB_14, early_bind=True)
+
+        # Pull generator key field data.
+        cls.gen_kf = cls.saw.get_key_field_list('gen')
+
+        # Pull generator data.
+        cls.gen_df_orig = cls.saw.GetParametersMultipleElement(
+            'gen', cls.gen_kf + ['GenMVRPercent', 'GenStatus', 'GenMVR',
+                                 'GenMVRMin', 'GenMVRMax']
+        )
+
+        # Pull load key field data.
+        cls.load_kf = cls.saw.get_key_field_list('load')
+
+        # Pull load data.
+        cls.load_df_orig = cls.saw.GetParametersMultipleElement(
+            'load', cls.load_kf + ['LoadSMW', 'LoadSMVR']
+        )
+
+        # Tweak generator 1's limits to match generator 2's limits. For
+        # whatever reason, the case starts with generator 1 having 0
+        # var limits.
+        cls.gen_df_orig.loc[0, ['GenMVRMin', 'GenMVRMax']] = \
+            cls.gen_df_orig.loc[1, ['GenMVRMin', 'GenMVRMax']]
+        cls.saw.change_parameters_multiple_element_df('gen', cls.gen_df_orig)
+
+        # Solve the power flow and save state.
+        cls.saw.SolvePowerFlow()
+        cls.saw.SaveState()
+
+    def setUp(self) -> None:
+        # Restore case.
+        self.saw.LoadState()
+
+        # Get copies of data.
+        self.gen_df = self.gen_df_orig.copy(deep=True)
+        self.load_df = self.load_df_orig.copy(deep=True)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        # noinspection PyUnresolvedReferences
+        cls.saw.exit()
+
+    def test_gen_off(self):
+        """A generator that is 'off' should have GenMVRPercent=0."""
+        # Open a generator, solve the power flow.
+        self.gen_df.loc[2, 'GenStatus'] = 'Open'
+        self.saw.change_parameters_multiple_element_df('gen', self.gen_df)
+        self.saw.SolvePowerFlow()
+
+        # Retrieve updated generator data.
+        data = self.saw.GetParametersMultipleElement(
+            'gen', self.gen_kf + ['GenStatus', 'GenMVRPercent']
+        )
+
+        # Ensure the generator is indeed open.
+        self.assertEqual(data.loc[2, 'GenStatus'], 'Open')
+
+        # Ensure the GenMVRPercent is 0 for that generator.
+        self.assertEqual(data.loc[2, 'GenMVRPercent'], 0)
+
+    def test_max_out_gen_var_production(self):
+        """Increase var loading in case, ensure GenMVRPercent=1"""
+        # First, make any leading loads lagging.
+        mask = self.load_df['LoadSMVR'] < 0
+        self.load_df.loc[mask, 'LoadSMVR'] = \
+            self.load_df.loc[mask, 'LoadSMVR'] * -1
+
+        # Increase reactive loading.
+        self.load_df['LoadSMVR'] = self.load_df['LoadSMVR'] * 2.1
+        self.saw.change_parameters_multiple_element_df('load', self.load_df)
+
+        # Solve the power flow.
+        self.saw.SolvePowerFlow()
+
+        # Pull generator data.
+        data = self.saw.GetParametersMultipleElement(
+            'gen', self.gen_kf + ['GenMVR', 'GenMVRPercent']
+        )
+
+        # With the exception of the swing bus, all MVRPercent values
+        # should be at 100.
+        self.assertTrue((data.loc[1:, 'GenMVRPercent'] == 100.0).all())
+
+        # Swing bus should be greater than 100 in this scenario.
+        self.assertTrue(data.loc[0, 'GenMVRPercent'] > 100.0)
+
+    def test_max_out_gen_var_consumption(self):
+        """Flip loads to produce vars."""
+        # Flip load vars as necessary
+        mask = self.load_df['LoadSMVR'] > 0
+        self.load_df.loc[mask, 'LoadSMVR'] = \
+            self.load_df.loc[mask, 'LoadSMVR'] * -1
+
+        # Up the magnitude of the var loading
+        self.load_df['LoadSMVR'] = self.load_df['LoadSMVR'] * 1.5
+
+        self.saw.change_parameters_multiple_element_df('load', self.load_df)
+
+        # Solve the power flow.
+        self.saw.SolvePowerFlow()
+
+        # Pull generator data.
+        data = self.saw.GetParametersMultipleElement(
+            'gen', self.gen_kf + ['GenMVR', 'GenMVRPercent']
+        )
+
+        # Notes:
+        # gen at bus 3 (index 2) is at 0% because it's min is 0%.
+        # Swing bus exceeds -100
+        #
+        # All gens except swing and gen at bus 3 should be at -100:
+        self.assertEqual(data.loc[1, 'GenMVRPercent'], -100.0)
+        self.assertTrue((data.loc[3:, 'GenMVRPercent'] == -100.0).all())
+        # Swing will be in excess of -100
+        self.assertTrue(data.loc[0, 'GenMVRPercent'] < -100.0)
+        # Gen at bus 3 is at 0 due to its limit of 0.
+        self.assertEqual(data.loc[2, 'GenMVRPercent'], 0.0)
+        # The corresponding GenMVRMin should be 0.
+        self.assertEqual(self.gen_df_orig.loc[2, 'GenMVRMin'], 0.0)
+
+
 #
 # # noinspection DuplicatedCode
 # class GridMindHardSolveTestCase(unittest.TestCase):
