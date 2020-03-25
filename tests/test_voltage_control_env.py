@@ -946,6 +946,10 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
         # Put the swing bus percentage above 100.
         obs.loc[0, 'GenMVRPercent'] = 101.00
 
+        # Ensure that both generators at buses 2 and 0 are on.
+        obs.loc[2, 'GenStatus'] = 'Closed'
+        obs.loc[0, 'GenStatus'] = 'Closed'
+
         # Patch the observation and get the array.
         with patch.object(self.env, 'gen_obs_data', new=obs):
             a = self.env.gen_var_frac_arr
@@ -958,6 +962,14 @@ class DiscreteVoltageControlEnv14BusResetTestCase(unittest.TestCase):
 
         # Swing bus should read 1.0
         self.assertEqual(a[0], 1.0)
+
+        # Now, open up the generator at bus 3. It should then have a
+        # fraction of 0.0.
+        obs.loc[2, 'GenStatus'] = 'Open'
+        with patch.object(self.env, 'gen_obs_data', new=obs):
+            a = self.env.gen_var_frac_arr
+
+        self.assertEqual(a[2], 0.0)
 
 
 # noinspection DuplicatedCode

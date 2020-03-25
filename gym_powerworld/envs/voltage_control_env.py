@@ -982,7 +982,10 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
         # If a generator is on but has a limit of 0, the GenMVRPercent
         # will come back at 0. Those generators will be changed to 1.0
         # indicating they're maxed out.
-        frac = np.where((frac == 0.0) & self.gen_var_lim_zero_arr, 1.0, frac)
+        frac = np.where(
+            (frac == 0.0) & self.gen_var_lim_zero_arr &
+            self.gen_status_arr.astype(bool),
+            1.0, frac)
 
         return frac
 
