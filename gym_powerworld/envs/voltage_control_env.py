@@ -3123,6 +3123,34 @@ class DiscreteVoltageControlGensBranchesShuntsEnv(DiscreteVoltageControlEnv):
         return n, spaces.Box(low=low, high=high, dtype=self.dtype)
 
 
+class DiscreteVoltageControlGenVarFracBranchesShuntsEnv(
+        DiscreteVoltageControlGensBranchesShuntsEnv):
+    """Environment which instead of providing simple generator states
+    instead provides generator var fractions on interval [0, 1].
+    """
+
+    def _get_observation(self) -> np.ndarray:
+        """Concatenate bus voltages, generator var fractions, shunt
+        states, and branch states.
+        """
+        # Note the voltage will only be scaled if self.scale_voltage_obs
+        # is True. Otherwise, it'll be raw voltages.
+        return np.concatenate(
+            (self.bus_pu_volt_arr_scaled, self.gen_var_frac_arr,
+             self.shunt_status_arr, self.branch_status_arr)
+        )
+
+    def _get_observation_failed_pf(self):
+        """Concatenate bus voltages (0 due to failed power flow),
+        generator states, shunt states, and branch states.
+        """
+        return np.concatenate(
+            (_get_observation_failed_pf_volt_only(self),
+             self.gen_var_frac_arr, self.shunt_status_arr,
+             self.branch_status_arr)
+        )
+
+
 class DiscreteVoltageControlSimpleEnv(DiscreteVoltageControlEnv):
     """Simplified version of the DiscreteVoltageControlEnv will use
     only bus magnitudes for observations, and will only consider voltage

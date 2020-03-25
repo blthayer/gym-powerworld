@@ -53,3 +53,9 @@ register(
     entry_point=
         'gym_powerworld.envs:DiscreteVoltageControlGensBranchesShuntsEnv'
 )
+
+register(
+    id='powerworld-discrete-env-genvarfrac-branch-shunt-v0',
+    entry_point=
+        'gym_powerworld.envs:DiscreteVoltageControlGenVarFracBranchesShuntsEnv'
+)
