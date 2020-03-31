@@ -1158,7 +1158,7 @@ class DiscreteVoltageControlEnvBase(ABC, gym.Env):
 
         # If the no op flag is true, override reward and done. No
         # this is not efficient, and that's okay.
-        if self.no_op_flag:
+        if self.no_op_flag and (action == self.no_op_action):
             reward = 0.0
             done = True
 
