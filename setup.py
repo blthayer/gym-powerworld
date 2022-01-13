@@ -41,7 +41,7 @@ setup(name='gym_powerworld',
             'numpy==1.18.1',
             'pandas==1.0.1',
             'esa==0.6.2',
-            'pillow==7.0.0',
+            'pillow==9.0.0',
             'matplotlib==3.1.2'
       ]
 )
