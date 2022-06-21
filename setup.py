@@ -38,7 +38,7 @@ setup(name='gym_powerworld',
       python_requires='>=3.5',
       install_requires=[
             'gym==0.15.4',
-            'numpy==1.18.1',
+            'numpy==1.22.0',
             'pandas==1.0.1',
             'esa==0.6.2',
             'pillow==7.0.0',
